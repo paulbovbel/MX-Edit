@@ -1,4 +1,4 @@
-"""Baut einen Block/Parameter-Katalog aus Rigs und Block-Presets."""
+"""Build a block/parameter catalog from rigs and block presets."""
 import json, glob, os, sys, collections
 root = sys.argv[1]
 cat = collections.OrderedDict()
@@ -47,6 +47,6 @@ for mod, m in cat.items():
         k: {kk: (sorted(vv, key=str) if isinstance(vv, set) else vv) for kk, vv in p.items()}
         for k, p in m['params'].items()}}
 json.dump({'modules': out, 'chain_usage': chains}, open('catalog.json', 'w'), indent=1, ensure_ascii=False)
-print('Module:', len(out), ' Parameter gesamt:', sum(len(m['params']) for m in out.values()))
-print('In Ketten verwendete Blocktypen:', len(chains))
-print('Nur aus Block-Presets:', sorted(k for k,m in out.items() if m['sources']==['block'])[:40])
+print('Module:', len(out), ' total parameters:', sum(len(m['params']) for m in out.values()))
+print('Block types used in chains:', len(chains))
+print('Only from block presets:', sorted(k for k,m in out.items() if m['sources']==['block'])[:40])

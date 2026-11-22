@@ -1,37 +1,32 @@
 #!/usr/bin/env python3
-"""MX5 Bridge - PC-Testprogramm 0.10 (inoffiziell)
+"""MX5 Bridge: unofficial PC test program 0.10.
 
-Voraussetzung:  pip install mido python-rtmidi   (bridge.py im selben Ordner)
-Aufruf:         python mx5bridge_test.py            automatischer Test
-                python mx5bridge_test.py --shell    interaktiv
-                python mx5bridge_test.py --ports    nur MIDI-Ports anzeigen
+Requires pip install mido python-rtmidi, with bridge.py alongside.
+Usage: python mx5bridge_test.py          automatic test
+       python mx5bridge_test.py --shell  interactive
+       python mx5bridge_test.py --ports  list MIDI ports only
+Output is also written to mx5bridge_testlog.txt.
 
-Ausgaben landen zusaetzlich in mx5bridge_testlog.txt.
-
-Stand nach 0.7:
-  - Laden:     /Engine/PresetCtrl/Rigs/ReceivePresetIndex = Programmnummer - 1
-  - Speichern: /Engine/RedirCtrl/EditModeSaveRig state=1 -> Dialog
-               cancel|save|save_new_rig = FS1|FS2|FS3 ueber RawFootswitches/FSn
-Neu in 0.8:
-  - Rig-Liste ueber die Bank-Anzeige des Rig-Modus: RigName1-3 lesen,
-    NextBank druecken, wiederholen. Laedt dabei hoffentlich kein Rig.
-Neu in 0.9:
-  - Shell-Befehl sql (Bruecke 0.3): Nur-Lese-Abfragen der Rig-Datenbank,
-    z. B.  sql select name, prog_num from rigs order by name
-Neu in 0.10:
-  - Shell-Befehle write (Bruecke 0.4, schreibend, eine Transaktion) und
-    action status|backup|restore|restart (Datenbankdienst),
-    z. B.  write update rigs set color = 3 where name = 'MXBRIDGE TEST'
+0.7: loading via /Engine/PresetCtrl/Rigs/ReceivePresetIndex=program-1;
+saving via /Engine/RedirCtrl/EditModeSaveRig state=1, then
+cancel|save|save_new_rig mapped to FS1|FS2|FS3 through RawFootswitches/FSn.
+0.8: read rig list from bank display: RigName1-3, NextBank, repeat;
+this should not load any rig.
+0.9: sql shell command for read-only rig DB queries (bridge 0.3), e.g.
+sql select name, prog_num from rigs order by name
+0.10: write shell command for transactional writes (bridge 0.4), and
+action status|backup|restore|restart; e.g.
+write update rigs set color = 3 where name = 'MXBRIDGE TEST'
 """
 import json, os, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)                    # PC-Test der Bruecke: bridge.py liegt daneben
-sys.path.insert(1, os.path.dirname(HERE))   # werkzeuge\ des Editors: bridge.py im Editor-Ordner
+sys.path.insert(0, HERE)                    # Standalone bridge PC test: bridge.py alongside
+sys.path.insert(1, os.path.dirname(HERE))   # Editor werkzeuge folder: bridge.py in parent editor folder
 try:
     import mido
 except ImportError:
-    sys.exit("Bitte zuerst installieren:  pip install mido python-rtmidi")
+    sys.exit("Please install first:  pip install mido python-rtmidi")
 from bridge import Bridge, BridgeError
 
 VERSION = "0.9"
@@ -62,9 +57,9 @@ def log(*a):
 
 
 def ask(q):
-    a = input(q + " [j/n] ").strip().lower()
+    a = input(q + " [y/n] ").strip().lower()
     log("   ", q, "->", a)
-    return a == "j"
+    return a in ("y", "yes")
 
 
 def ask_text(q):
@@ -78,11 +73,11 @@ def step(title, fn):
     try:
         return fn()
     except BridgeError as e:
-        log("  FEHLER:", e)
+        log("  ERROR:", e)
     except Abort:
         raise
     except Exception as e:
-        log("  AUSNAHME:", type(e).__name__, e)
+        log("  EXCEPTION:", type(e).__name__, e)
 
 
 def alive(b):
@@ -90,22 +85,22 @@ def alive(b):
         b.ping()
         return True
     except BridgeError:
-        log("  Bruecke antwortet nicht mehr. Abbruch, bitte MX5 neu starten.")
+        log("  Bridge stopped responding. Aborting; please restart the MX5.")
         raise Abort()
 
 
 def connect():
     ins, outs = mido.get_input_names(), mido.get_output_names()
-    log("Eingaenge:", ins)
-    log("Ausgaenge:", outs)
+    log("Inputs:", ins)
+    log("Outputs:", outs)
     try:
         i, o = Bridge.find_ports()
     except BridgeError as e:
         log(e)
-        log("Hinweis: Der Port erscheint ca. 10 s nach dem Start des MX5 bzw. nach")
-        log("Verlassen des USB-Transfer-Modus.")
+        log("Note: the port appears about 10 s after MX5 startup or after")
+        log("leaving USB Transfer mode.")
         sys.exit(1)
-    log("Verwende Eingang '%s', Ausgang '%s'" % (i, o))
+    log("Using input '%s', output '%s'" % (i, o))
     return Bridge(i, o)
 
 
@@ -116,7 +111,7 @@ def rig_state(b):
 
 def short(v):
     if not v.get("ok"):
-        return "(fehlt)"
+        return "(missing)"
     keys = ("string", "unnormalized", "index", "state", "numEntries", "maximum")
     return {k: v[k] for k in keys if k in v}
 
@@ -151,18 +146,18 @@ def send_pc(b, program, channel):
 
 def js_list(expr):
     return ("var l = %s; if (l === undefined || l === null) return 'undefined'; "
-            "try { return l.length + ' Eintraege: ' + Array.prototype.slice.call(l, 0, 40).join(' | '); } "
-            "catch (e) { return 'kein Array: ' + l; }" % expr)
+            "try { return l.length + ' entries: ' + Array.prototype.slice.call(l, 0, 40).join(' | '); } "
+            "catch (e) { return 'not an array: ' + l; }" % expr)
 
 
 def js_members(expr):
     return ("var o = %s; if (o === undefined || o === null) return 'undefined'; var r = []; "
             "for (var k in o) { var t; try { t = typeof o[k]; } catch (e) { t = '?'; } r.push(k + ':' + t); } "
-            "return r.length + ' Mitglieder: ' + r.join(' ');" % expr)
+            "return r.length + ' members: ' + r.join(' ');" % expr)
 
 
 def browse_banks(b, start_id, limit=60):
-    """NextBank druecken, bis sich die erste Dreiergruppe wiederholt. Liefert (liste, geladen_geaendert)."""
+    """Press NextBank until the initial triplet repeats; return (list, loaded_changed)."""
     first = bank_names(b)
     seen, banks = [first], 1
     log("  Bank 1: %s" % first)
@@ -184,9 +179,9 @@ def browse_banks(b, start_id, limit=60):
 
 def autotest(b):
     ver = step("1. PING", lambda: b.ping())
-    log("  Antwort:", ver)
+    log("  Reply:", ver)
     if not b.v2:
-        log("Bruecke 0.2 wird benoetigt.")
+        log("Bridge 0.2 is required.")
         return
 
     def props():
@@ -194,77 +189,77 @@ def autotest(b):
         for k, v in st.items():
             log("  Rigs/%s: %s" % (k, short(v)))
         bm = b.get(BOARD)
-        log("  BoardMode: %s | Eintraege: %s" % (short(bm), b.entries(BOARD)))
+        log("  BoardMode: %s | entries: %s" % (short(bm), b.entries(BOARD)))
         res = b.get_many(["%s/%s" % (PC, n) for n in BANK_PROPS])
         for n in BANK_PROPS:
             log("  PresetCtrl/%s: %s" % (n, short(res["%s/%s" % (PC, n)])))
         return st, bm
-    st, bm = step("2. Rig- und Bank-Eigenschaften", props) or (None, None)
+    st, bm = step("2. Rig and bank properties", props) or (None, None)
     alive(b)
     if not st:
         return
 
     def banks():
         if st["Dirty"].get("state"):
-            log("  Rig hat ungespeicherte Aenderungen, Test uebersprungen (bitte erst speichern).")
+            log("  Rig has unsaved edits; test skipped (please save first).")
             return
         start_id, start_name = st["LoadedID"].get("string"), st["LoadedName"].get("string")
-        if not ask("Baenke durchblaettern (NextBank bis zur ersten Wiederholung)? Bitte aufs Display schauen."):
-            log("  uebersprungen")
+        if not ask("Browse banks (NextBank until first repeat)? Please watch the device display."):
+            log("  skipped")
             return
         rigs, n, changed = browse_banks(b, start_id)
-        log("  %d Baenke, %d Rig-Namen: %s" % (n, len(rigs), rigs))
-        log("  Geladenes Rig gewechselt: %s (jetzt %s)" % (changed, rig_state(b)["LoadedName"].get("string")))
-        ask_text("Was hat sich am Display getan?")
-        if len(set(rigs)) <= 3 and ask("Nur eine Bank gesehen. Im Rig-Modus (BoardMode) noch einmal probieren?"):
+        log("  %d banks, %d rig names: %s" % (n, len(rigs), rigs))
+        log("  Loaded rig changed: %s (now %s)" % (changed, rig_state(b)["LoadedName"].get("string")))
+        ask_text("What changed on the device display?")
+        if len(set(rigs)) <= 3 and ask("Only one bank found. Try again in Rig mode (BoardMode)?"):
             old = bm.get("index", 0)
             names = b.entries(BOARD)
             target = next((i for i, s in enumerate(names) if s == "Rig"), None)
             if target is None:
-                log("  Kein 'Rig'-Modus in der Liste.")
+                log("  No Rig mode in the list.")
             else:
                 log("  BoardMode -> Rig:", short(b.set(BOARD, "index", target)))
                 time.sleep(1.0)
                 rigs, n, changed = browse_banks(b, start_id)
-                log("  %d Baenke, %d Rig-Namen: %s" % (n, len(rigs), rigs))
-                log("  Geladenes Rig gewechselt: %s" % changed)
-                ask_text("Was hat sich am Display getan?")
-                log("  BoardMode zurueck:", short(b.set(BOARD, "index", old)))
+                log("  %d banks, %d rig names: %s" % (n, len(rigs), rigs))
+                log("  Loaded rig changed: %s" % changed)
+                ask_text("What changed on the device display?")
+                log("  BoardMode restored:", short(b.set(BOARD, "index", old)))
         if rig_state(b)["LoadedID"].get("string") != start_id:
-            log("  Bitte '%s' am MX5 wieder laden." % start_name)
-    step("3. Rig-Liste ueber die Bank-Anzeige", banks)
+            log("  Please reload '%s' on the MX5." % start_name)
+    step("3. Rig list through bank display", banks)
     alive(b)
 
     def load_from_bank():
         st2 = rig_state(b)
         start_name, start_prog = st2["LoadedName"].get("string"), prog_of(st2)
         names = bank_names(b)
-        log("  Aktuelle Bank: %s | geladen: %s" % (names, start_name))
+        log("  Current bank: %s | loaded: %s" % (names, start_name))
         other = next((i for i, n in enumerate(names) if n and n != start_name), None)
         if other is None:
-            log("  Kein anderes Rig in der Bank, uebersprungen.")
+            log("  No other rig in the bank; skipped.")
             return
-        if not ask("LoadRig%d druecken (laedt '%s')?" % (other + 1, names[other])):
-            log("  uebersprungen")
+        if not ask("Press LoadRig%d (loads '%s')?" % (other + 1, names[other])):
+            log("  skipped")
             return
         log("  LoadRig%d:" % (other + 1), press(b, "%s/LoadRig%d" % (PC, other + 1)))
         time.sleep(2.5)
-        log("  geladen:", rig_state(b)["LoadedName"].get("string"))
+        log("  loaded:", rig_state(b)["LoadedName"].get("string"))
         if start_prog is not None:
             b.set("%s/ReceivePresetIndex" % RIGS, "unnormalized", start_prog - 1)
             time.sleep(2.5)
-            log("  zurueck per Programmnummer %d: geladen ist %s" % (start_prog, rig_state(b)["LoadedName"].get("string")))
+            log("  restored via program %d: loaded %s" % (start_prog, rig_state(b)["LoadedName"].get("string")))
         else:
-            log("  Bitte '%s' am MX5 wieder laden." % start_name)
-    step("4. Rig aus der Bank laden", load_from_bank)
+            log("  Please reload '%s' on the MX5." % start_name)
+    step("4. Load rig from bank", load_from_bank)
 
 
 def shell(b):
-    log("verbunden:", b.ping())
-    print("Befehle: ping | get <pfad> | set <pfad> <feld> <wert> | entries <pfad> | many <pfad>;<pfad>")
-    print("         pc <nr> | fs <1-3> | press <pfad> | save | bank | ls <ordner> | members <js> | eval <js>")
-    print("         sql <abfrage> (Bruecke 0.3, nur lesend) | write <anweisungen> (0.4, Transaktion)")
-    print("         action status|backup|restore|restart (0.4) | sh <shell-zeile> | dir <ordner> (0.3) | quit")
+    log("connected:", b.ping())
+    print("Commands: ping | get <path> | set <path> <field> <value> | entries <path> | many <path>;<path>")
+    print("         pc <number> | fs <1-3> | press <path> | save | bank | ls <folder> | members <js> | eval <js>")
+    print("         sql <query> (bridge 0.3, read-only) | write <statements> (0.4, transaction)")
+    print("         action status|backup|restore|restart (0.4) | sh <shell-line> | dir <folder> (0.3) | quit")
     ch = midi_channel(b)
     while True:
         try:
@@ -284,7 +279,7 @@ def shell(b):
                 log(b.get(rest))
             elif cmd == "set":
                 parts = rest.rsplit(" ", 2)
-                log(b.set(*parts) if len(parts) == 3 else "set <pfad> <feld> <wert>")
+                log(b.set(*parts) if len(parts) == 3 else "set <path> <field> <value>")
             elif cmd == "entries":
                 log(b.entries(rest))
             elif cmd == "many":
@@ -310,11 +305,11 @@ def shell(b):
                 log(b.eval(rest))
             elif cmd == "sql":
                 rows = b.sql(rest)
-                log("%d Zeilen" % len(rows))
+                log("%d rows" % len(rows))
                 for r in rows[:60]:
                     log(" ", json.dumps(r, ensure_ascii=False)[:300])
             elif cmd == "write":
-                log("%d Zeilen geaendert" % b.sql_write(rest))
+                log("%d rows changed" % b.sql_write(rest))
             elif cmd == "action":
                 log(json.dumps(b.action(rest.strip()), ensure_ascii=False))
             elif cmd == "sh":
@@ -324,22 +319,22 @@ def shell(b):
                 for name, is_dir, mtime in b.list_dir(rest or "/media/az01-internal/Evil/usb_mnt/Impulse Responses"):
                     log(" ", name + ("/" if is_dir else ""))
             else:
-                print("unbekannter Befehl")
+                print("unknown command")
         except BridgeError as e:
-            log("FEHLER:", e)
+            log("ERROR:", e)
 
 
 if __name__ == "__main__":
     log("\n##### MX5 Bridge Test %s" % VERSION, time.strftime("%Y-%m-%d %H:%M:%S"), "#####")
     if "--ports" in sys.argv:
-        log("Eingaenge:", mido.get_input_names())
-        log("Ausgaenge:", mido.get_output_names())
+        log("Inputs:", mido.get_input_names())
+        log("Outputs:", mido.get_output_names())
         sys.exit()
     bridge = connect()
     try:
         shell(bridge) if "--shell" in sys.argv else autotest(bridge)
     except Abort:
-        log("Abgebrochen.")
+        log("Cancelled.")
     finally:
         bridge.close()
-    log("Fertig. Log: mx5bridge_testlog.txt")
+    log("Done. Log: mx5bridge_testlog.txt")

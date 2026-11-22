@@ -206,8 +206,11 @@ firmware/          bridge firmware: patcher, device files (mod/), build scripts
 docs/PROTOCOL.md   SysEx protocol and useful device property paths
 ```
 
-Source comments and developer tool output are mostly in German. The editor UI, the patcher and
-the docs are in English.
+The editor UI, patcher, documentation, source comments and developer tool output
+are in English. Existing device identifiers, configuration paths and script names
+are retained for compatibility; Unicode regression fixtures intentionally include
+non-English characters. The live regression tool accepts `--quick` (and the legacy
+`--schnell` alias).
 
 ## Status
 

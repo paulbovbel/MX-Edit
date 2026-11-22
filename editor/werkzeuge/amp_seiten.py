@@ -1,13 +1,14 @@
-"""Liest am Geraet fuer jedes Amp-Modell die Reglerseite und schreibt modellseiten.json.
+"""Read each amp model's device control page and write modellseiten.json.
 
-Jedes Amp-Modell nutzt nur einen Teil der Amp-Parameter (GainA, Bright, JCDistortion, ...),
-unter eigener Beschriftung. Das Geraet zeigt die Seite des Blocks, auf dem RedirCtrl/CurModule
-steht: RedirCtrl/ParamName<k> = Beschriftung ("" = unbenutzt), ParamRedirected<k>.path =
-der echte Parameterpfad. Das Werkzeug laedt das Test-Rig MXBRIDGE TEST (Setlist GHOST),
-schaltet Amp/Type durch alle Modelle und verwirft die Aenderungen danach (~30 s).
-Haelfte B (Type2) hat dieselben Seiten mit Endung 2 (Tremolo/TremSync gemeinsam), 2026-09-29 geprueft.
+Each model uses a subset of amp parameters (GainA, Bright, JCDistortion, ...)
+with model-specific labels. The device shows the block selected by
+RedirCtrl/CurModule: ParamName<k> is label (empty means unused),
+ParamRedirected<k>.path is the actual parameter path. Load MXBRIDGE TEST in
+GHOST, cycle Amp/Type through all models, then discard changes (~30 s).
+Half B (Type2) uses identical pages with suffix 2; Tremolo/TremSync are shared
+(verified 2026-09-29).
 
-Aufruf (aus dem Editor-Ordner): python werkzeuge\\amp_seiten.py
+Usage from editor folder: python werkzeuge/amp_seiten.py
 """
 import json, os, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +29,7 @@ def main():
     st = L.rig_status(br)
     if st["name"] != TEST_RIG:
         if st["dirty"]:
-            sys.exit("Das geladene Rig '%s' hat ungespeicherte Aenderungen - bitte erst speichern oder verwerfen." % st["name"])
+            sys.exit("Loaded rig '%s' has unsaved edits; please save or discard first." % st["name"])
         res = L.read_rig_list(br)
         if res["setlist"] != TEST_SET:
             res = L.enter_setlist(br, res["setlists"], TEST_SET, res["setlist_ids"])
@@ -43,7 +44,7 @@ def main():
             br.set("/Engine/Patch/Chain/ModuleType%d" % k, "user", "Amp")
             time.sleep(0.6)
             chain[k - 1] = "Amp"
-        br.set("/Engine/RedirCtrl/CurModule", "index", chain.index("Amp") + 1)   # Eintraege: Input, 1..11, ...
+        br.set("/Engine/RedirCtrl/CurModule", "index", chain.index("Amp") + 1)   # Entries: Input, 1..11, ...
         time.sleep(0.3)
         pages = {}
         for i, model in enumerate(br.entries("/Engine/Patch/Amp/Type")):
@@ -54,8 +55,8 @@ def main():
             print(model, pages[model])
     finally:
         st = L.reload_rig(br, rows)
-        print("Test-Rig neu geladen:", st["name"], "geaendert" if st["dirty"] else "unveraendert")
-    lines = ['{', ' "quelle": "MX5 Firmware 2.7, RedirCtrl/ParamName + ParamRedirected je Modell (werkzeuge/amp_seiten.py)",',
+        print("Test rig reloaded:", st["name"], "modified" if st["dirty"] else "unchanged")
+    lines = ['{', ' "quelle": "MX5 Firmware 2.7, RedirCtrl/ParamName + ParamRedirected per model (werkzeuge/amp_seiten.py)",',
              ' "Amp": {']
     items = list(pages.items())
     for n, (model, rows) in enumerate(items):
@@ -64,7 +65,7 @@ def main():
     lines += [' }', '}', '']
     with open(OUT, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(lines))
-    print("%d Modelle -> %s" % (len(pages), OUT))
+    print("%d models -> %s" % (len(pages), OUT))
 
 
 if __name__ == "__main__":
