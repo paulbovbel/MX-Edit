@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Was die MX5 Bridge am rootfs aendert - gemeinsam fuer build.py (Linux, debugfs) und
-patcher.py (Windows/ueberall, reines Python ueber ext4.py). Meldungen englisch: der Patcher
-zeigt sie Endnutzern.
+"""Root filesystem changes shared by build.py (Linux/debugfs) and patcher.py
+(cross-platform, pure Python via ext4.py). Messages are shown to end users.
 
-plan(cat) liest die noetigen Originaldateien ueber cat(pfad) -> bytes (b'' = fehlt) und
-liefert {zielpfad: (inhalt bytes, modus int)}. Die Versionsnummer steht nur hier (VERSION);
-sie wird fuer @VERSION@ in alle Dateien aus mod/ eingesetzt."""
+plan(cat) reads original files via cat(path) -> bytes (b'' means missing) and
+returns {target_path: (content_bytes, mode_int)}. VERSION is defined only here
+and replaces @VERSION@ in every file from mod/."""
 import os, re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -14,19 +13,19 @@ BIN = os.path.join(HERE, 'bin')
 
 VERSION = '0.7'
 
-# Name, unter dem Evil das USB-MIDI-Gadget fuehrt (Dateinamen der Assignment-QML;
-# Leerzeichen -> Unterstrich, wie bei "HG04_Control_Surface_MIDI_1"; in 0.1 bestaetigt)
+# Evil's USB-MIDI gadget name (assignment QML filename;
+# spaces become underscores, as in 'HG04_Control_Surface_MIDI_1'; confirmed in 0.1).
 NAME = 'f_midi'
 
-# Modelle der Firmware-Linie 2.7 (Andere_Geraete/BEFUND.txt: gleiche Startskripte, gleicher Kernel,
-# gleiche Werks-DB; Unterschied fuer die Bruecke nur der USB-Produktname). Schluessel = FIT
-# "compatible" ohne "inmusic,". device = Name in Texten (@DEVICE@ in mod/), tested = auf echter
-# Hardware mit der Bruecke geprueft (dann auch in der Hauptausgabe), beta = Bruecke laeuft dort
-# (Diagnose-Logs von Testern), Editor-Unterstuetzung ist aber noch Beta (Patcher: "Beta"-Hinweis
-# statt Risiko-Haken), recovery = Wiederherstellung per Fussschalter beim Einschalten.
-# Pedalboard seit 2026-10-19 in der Hauptausgabe (Bruecke 0.7 lief laut Diagnose-Logs vom 11./13.10.).
-# url = Windows-Updater (7z-SFX), mac_url = macOS-Updater (Zip mit .app, gleiches Update.img - beim MX5
-# am 2026-11-01 geprueft; URLs wie in app/main.c der NAM-Mod).
+# Firmware 2.7 models (Andere_Geraete/BEFUND.txt: same startup scripts, kernel,
+# and factory DB; only the USB product name differs for the bridge). Keys are FIT
+# 'compatible' values without 'inmusic,'. device is the display name (@DEVICE@ in mod/).
+# tested means verified on hardware and included in the main release; beta means
+# the bridge runs according to tester logs, but editor support remains beta
+# (a beta notice replaces the risk checkbox). recovery is the power-on footswitch recovery procedure.
+# Pedalboard joined the main release on 2026-10-19 (bridge 0.7 logs from Oct 11/13).
+# url: Windows updater (7z-SFX); mac_url: macOS updater (ZIP with .app, same Update.img;
+# verified on MX5 on 2026-11-01; URLs from the NAM mod's app/main.c).
 CDN = 'https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/'
 MODELS = {
     'hg04': dict(key='mx5', device='MX5', tested=True, beta=False, recovery='hold footswitches 1 and 2 while powering on',
@@ -45,38 +44,38 @@ MODELS = {
 }
 
 
-# Testausgabe (Repo MX-Edit-Testing): die Datei testing.flag neben diesem Modul (in der EXE als Daten,
-# tools/patcher_exe.py --testing) schaltet die ungeprueften Modelle frei (Gigboard). Ohne sie bietet
-# der Patcher nur gepruefte Modelle an (MX5, Pedalboard als Beta) und lehnt Firmware der anderen
-# mit einem Hinweis ab.
+# Testing release (MX-Edit-Testing): testing.flag next to this module (bundled by
+# tools/patcher_exe.py --testing) enables unverified models (Gigboard). Otherwise,
+# the patcher offers only verified models (MX5, Pedalboard beta) and rejects other
+# firmware with an explanatory message.
 TESTING = os.path.exists(os.path.join(HERE, 'testing.flag'))
 TESTING_URL = 'https://github.com/TicT4x/MX-Edit-Testing'
-# Name, den Nutzer sehen: die Testausgabe richtet sich an alle drei Geraete und heisst darum
-# "HeadRush Bridge" (Fenster, Updater-Texte, Ordner); intern (Ping 'MX5Bridge-<v>', Skripte
-# mx5bridge-*.sh, Ordner auf dem Geraet) bleibt es die MX5 Bridge - das ist Protokoll.
-BRAND = 'HeadRush Bridge' if TESTING else 'MX5 Bridge'          # Fliesstext, Fenstertitel
-LABEL = 'HeadRush Bridge' if TESTING else 'MX5Bridge'           # Updater: "Install <LABEL> 0.7"
-FILE_TAG = 'HeadRush_Bridge' if TESTING else 'MX5Bridge'        # Ordner-/Dateinamen
+# User-facing name: the testing release targets all three devices, so it uses
+# 'HeadRush Bridge' for windows, updater text and folders. Internal names (ping 'MX5Bridge-<v>',
+# mx5bridge-*.sh scripts, device folders) remain unchanged protocol identifiers.
+BRAND = 'HeadRush Bridge' if TESTING else 'MX5 Bridge'          # Display text and window title
+LABEL = 'HeadRush Bridge' if TESTING else 'MX5Bridge'           # Updater: 'Install <LABEL> 0.7'
+FILE_TAG = 'HeadRush_Bridge' if TESTING else 'MX5Bridge'        # Folder/file names
 
 
 def label(device='MX5'):
-    """LABEL fuer ein Geraet: andere Geraete als das MX5 heissen auch in der Hauptausgabe
-    'HeadRush Bridge' (Pedalboard-Beta), das MX5 bleibt byte-gleich 'MX5Bridge'."""
+    """Device LABEL: non-MX5 devices use 'HeadRush Bridge' even in the main release
+    (Pedalboard beta); MX5 keeps the exact original 'MX5Bridge' identifier."""
     return LABEL if device == 'MX5' else 'HeadRush Bridge'
 
 
 def file_tag(device='MX5'):
-    """FILE_TAG fuer ein Geraet (siehe label)."""
+    """Device FILE_TAG (see label)."""
     return FILE_TAG if device == 'MX5' else 'HeadRush_Bridge'
 
 
 def offered():
-    """Modelle, die dieser Patcher baut (Testausgabe: alle)."""
+    """Models supported by this patcher (testing release: all)."""
     return [dict(m, compatible=c) for c, m in MODELS.items() if m['tested'] or TESTING]
 
 
 def model(key):
-    """Modell nach Schluessel ('mx5', 'pedalboard', 'gigboard') oder compatible ('hg04', ...)."""
+    """Look up a model by key ('mx5', 'pedalboard', 'gigboard') or compatible ('hg04', ...)."""
     for compat, m in MODELS.items():
         if key in (compat, m['key']):
             return dict(m, compatible=compat)
@@ -84,25 +83,25 @@ def model(key):
 
 
 def model_of_fit(compatible):
-    """compatible-String aus dem FIT-Kopf (z. B. 'inmusic,mg01') -> Modell."""
+    """Map a FIT header compatible string (e.g. 'inmusic,mg01') to a model."""
     c = compatible.split(',')[-1].strip().lower()
     if c not in MODELS:
         raise PatchError('This firmware is for an unsupported device ("%s"). Supported: HeadRush %s.'
                          % (compatible, ', '.join(m['device'] for m in MODELS.values())))
     return model(c)
 
-MIDI_BLOCK = '''    ### MX5 Bridge: USB-MIDI-Funktion (nicht kritisch) ###
+MIDI_BLOCK = '''    ### MX5 Bridge: USB-MIDI function (noncritical) ###
     { ( mkdir -p functions/midi.mx5bridge &&
         echo 1 >functions/midi.mx5bridge/in_ports &&
         echo 1 >functions/midi.mx5bridge/out_ports &&
         ln -s functions/midi.mx5bridge configs/c.1 ) ||
-      logger -t mx5bridge "USB-MIDI-Funktion konnte nicht angelegt werden"; true; } &&
+      logger -t mx5bridge "Could not create USB-MIDI function"; true; } &&
 '''
 ENABLE = '    ### Enable the gadget:\n    echo ff580000.usb >UDC\n)\n'
 HOOK = '/usr/Evil/Scripts/mx5bridge-usb.sh'
 DBHOOK = '/usr/Evil/Scripts/mx5bridge-db.sh'
 SQLITE_TARGET = '/usr/Evil/Scripts/mx5bridge-sqlite3'
-DAEMON = ('# MX5 Bridge: USB-MIDI-Dienst und Datenbankdienst (nicht kritisch)\n'
+DAEMON = ('# MX5 Bridge: USB-MIDI and database services (noncritical)\n'
           'setsid %s daemon >/dev/null 2>&1 </dev/null &\n'
           'setsid %s daemon >/dev/null 2>&1 </dev/null &\n\n' % (HOOK, DBHOOK))
 
@@ -117,7 +116,7 @@ def need(cond, msg):
 
 
 def mod_text(name, device='MX5'):
-    """Datei aus mod/ mit eingesetzter Version und Geraetename."""
+    """Read a file from mod/ and substitute the version and device name."""
     text = open(os.path.join(MOD, name), encoding='ascii').read()
     text = text.replace('@VERSION@', VERSION).replace('@DEVICE@', device)
     assert '@VERSION@' not in text and '@DEVICE@' not in text
@@ -157,8 +156,8 @@ def patch_ms_remove(text):
     return text + '%s evil-end\n' % HOOK
 
 
-# App-Start in der Startschleife; die NAM-Mod setzt 'env LD_PRELOAD=... NAM_HOOK_SLOT_..._ADDR=...'
-# davor (core/launcher_script.c der Mod) und einen Kommentarblock vor 'while [ 1 ]'
+# App launch in the startup loop; NAM prepends 'env LD_PRELOAD=... NAM_HOOK_SLOT_..._ADDR=...'
+# (core/launcher_script.c) and a comment block before 'while [ 1 ]'.
 EVIL_START = '\tsystemd-inhibit --what=handle-power-key /usr/Evil/Evil\n'
 EVIL_RUN = re.compile(r'\tsystemd-inhibit --what=handle-power-key '
                       r'(env LD_PRELOAD=/usr/Evil/libnam_preload\.so'
@@ -170,12 +169,12 @@ NAM_INFO = '/usr/Evil/Scripts/mx5bridge-nam.txt'
 
 
 def patch_evil(text):
-    """Startschleife: prestart, postexit, Neustart-Marker. Mit NAM-Mod startet die App nur mit
-    der NAM-Zeile der Mod, wenn 'mx5bridge-db.sh nam' ja sagt, sonst wie im Original.
-    Liefert (Text, NAM-Startzeile oder None)."""
+    """Startup loop: prestart, postexit and restart marker. With NAM installed,
+    use its launch line only if 'mx5bridge-db.sh nam' allows it; otherwise launch
+    normally. Return (text, NAM launch line or None)."""
     need('mx5bridge' not in text, 'start script "evil" is already patched (MX5 Bridge already installed?)')
     runs = list(EVIL_RUN.finditer(text))
-    code = [l for l in text.split('\n') if not l.lstrip().startswith('#')]   # der NAM-Block erwaehnt es
+    code = [l for l in text.split('\n') if not l.lstrip().startswith('#')]   # The NAM block mentions it.
     need(len(runs) == 1 and sum('systemd-inhibit' in l for l in code) == 1, 'start script "evil" has an unexpected layout')
     m = runs[0]
     need(text[:m.start()].endswith('while [ 1 ]\ndo\n'), 'start script "evil" has an unexpected layout')
@@ -214,8 +213,8 @@ def sqlite_binary():
 
 
 def device_of(start_script):
-    """Geraetename aus dem Produktnamen, den das Original-Startskript dem USB-Audio-Gadget gibt
-    ('HeadRush MX5' / 'HeadRush Pedalboard' / 'HeadRush GigBoard')."""
+    """Extract the device name from the original startup script's USB audio product
+    name ('HeadRush MX5' / 'HeadRush Pedalboard' / 'HeadRush GigBoard')."""
     m = re.findall(r"echo 'HeadRush ([A-Za-z0-9]+)' >strings/0x409/product", start_script)
     need(len(m) == 1, 'USB start script has an unexpected layout (product name not found)')
     for mm in MODELS.values():
@@ -225,9 +224,10 @@ def device_of(start_script):
 
 
 def plan(cat, nam_info=None, log=print, device=None):
-    """Liefert ({zielpfad: (bytes, modus)}, nam-startzeile oder None). cat(pfad) -> bytes, b'' = fehlt.
-    nam_info: Herkunftstext der NAM-Mod (tools/nam-mod.sh), sonst 'unbekannt'. device: erwartetes
-    Geraet ('MX5', 'Pedalboard', 'Gigboard'); None = aus dem Startskript."""
+    """Return ({target_path: (bytes, mode)}, NAM launch line or None).
+    cat(path) -> bytes, b'' means missing. nam_info: NAM source information
+    (tools/nam-mod.sh), otherwise 'unknown'. device: expected device ('MX5',
+    'Pedalboard', 'Gigboard'); None detects it from the startup script."""
     text = lambda p: cat(p).decode()
     found = device_of(text('/usr/Evil/Scripts/usb-otg-audio-start.sh'))
     need(device in (None, found), 'This firmware is for the HeadRush %s, not the %s' % (found, device))
@@ -247,14 +247,14 @@ def plan(cat, nam_info=None, log=print, device=None):
     evil, nam = patch_evil(text('/usr/Evil/Scripts/evil'))
     files['/usr/Evil/Scripts/evil'] = (evil.encode(), 0o100755)
 
-    # NAM-Mod: nur wenn die Eingabe sie schon enthaelt (tools/nam-mod.sh oder GUI der Mod)
+    # Enable NAM only if already present in the input (tools/nam-mod.sh or NAM GUI).
     libs = [len(cat(p)) for p in NAM_LIBS]
     need(all(libs) == bool(nam) and any(libs) == bool(nam),
          'NAM libraries and NAM start line do not match: %s' % libs)
     if nam:
         log('NAM mod found: ' + nam.strip())
-        info = nam_info or 'nam_mod_ref=unbekannt\n'
-        if 'nam_instanzen=' not in info:   # z. B. Updater aus der GUI der Mod: aus der Startzeile
+        info = nam_info or 'nam_mod_ref=unknown\n'
+        if 'nam_instanzen=' not in info:   # E.g. a NAM GUI updater: extract it from the launch line.
             info += 'nam_instanzen=%d\n' % (4 if 'NAM_HOOK_SLOT_GONK_V2_ADDR=' in nam else 2)
         info += 'startzeile=%s' % nam.strip().replace('systemd-inhibit --what=handle-power-key ', '') + '\n'
         files[NAM_INFO] = (info.encode('ascii'), 0o100644)
@@ -263,7 +263,7 @@ def plan(cat, nam_info=None, log=print, device=None):
         if kind == 'Device':
             assert 'bridgeVersion: "MX5Bridge-%s"' % VERSION in tpl
         files['/usr/Evil/Assignments/%s_%s.qml' % (NAME, kind)] = (enc(tpl.replace('@NAME@', NAME)), 0o100644)
-    # Neue Dateien duerfen keine Originaldateien ueberschreiben; Skripte brauchen LF
+    # New files must not overwrite original files; scripts require LF endings.
     for target, (data, mode) in files.items():
         if target.endswith(('.sh', '.qml')) or target.endswith(('runevil', '/evil')):
             need(b'\r' not in data, 'CRLF in ' + target)

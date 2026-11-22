@@ -1,7 +1,7 @@
 #!/bin/sh
-# Lokaler Funktionstest von mx5bridge-db.sh unter WSL (Pfade umgebogen, Zeitlimit der Shell 2 s).
-# Aufruf: sh daemontest.sh ../mod/mx5bridge-db.sh   (braucht sqlite3, flock, logger, busybox)
-# Der Dienst laeuft unter "busybox sh" wie auf dem Geraet.
+# Local mx5bridge-db.sh integration test on WSL (redirected paths, 2 s shell timeout).
+# Usage: sh daemontest.sh ../mod/mx5bridge-db.sh (requires sqlite3, flock, logger, busybox)
+# The service runs under busybox sh, matching the device.
 set -e
 T=/tmp/mx5btest
 rm -rf "$T"; mkdir -p "$T/evil" "$T/tmp"
@@ -23,20 +23,20 @@ DPID=$!
 sleep 0.3
 n=0
 FAIL=0
-# Antwortverzeichnis wie die QML lesen: Namen sortieren, Nummer weg, base64url -> Text
+# Read reply directory like QML: sort names, strip sequence, base64url -> text
 decode() { ls "$1" | sort | sed 's/^[0-9]*_//' | tr -d '\n' | tr -- '-_' '+/' | base64 -d; }
-ask() {   # ask <kind> <text>   -> Antwort in $REPLY_TEXT
+ask() {   # ask <kind> <text>   -> Reply in $REPLY_TEXT
 	n=$((n+1)); base="$T/tmp/$1$n"
 	printf '%s' "$2" > "$base.sql"; echo go > "$base.go"
 	i=0; while [ ! -e "$base.rdy" ]; do sleep 0.05; i=$((i+1)); [ $i -gt 200 ] && { echo "TIMEOUT $1$n"; FAIL=1; return 1; }; done
 	decode "$base.r" > "$T/reply.json"
 	echo "--- $1: $(printf '%s' "$2" | head -c 90)"
 	head -c 300 "$T/reply.json"; echo
-	python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$T/reply.json" 2>/dev/null || { echo "!!! kein gueltiges JSON"; FAIL=1; }
+	python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$T/reply.json" 2>/dev/null || { echo "!!! invalid JSON"; FAIL=1; }
 	echo done > "$base.done"
 }
-expect() {   # expect <python-ausdruck ueber r>
-	python3 -c "import json,sys; r=json.load(open(sys.argv[1])); assert $1, r" "$T/reply.json" 2>/dev/null && echo "    ok: $1" || { echo "!!! erwartet: $1"; FAIL=1; }
+expect() {   # expect <Python expression using r>
+	python3 -c "import json,sys; r=json.load(open(sys.argv[1])); assert $1, r" "$T/reply.json" 2>/dev/null && echo "    ok: $1" || { echo "!!! expected: $1"; FAIL=1; }
 }
 ask q "select count(*) n from rigs"; expect 'r["ok"] and r["rows"][0]["n"] == 2'
 ask a "status"; expect 'r["rows"][0]["version"] == "test"'
@@ -49,65 +49,65 @@ ask w "delete from rigs where id='r1'"
 ask q "select rig_id from setlist_rigs order by rig_id"; expect '[x["rig_id"] for x in r["rows"]] == ["r2"]'
 ask a "backup"; expect 'r["ok"] and r["rows"][0]["backup_kb"] > 0'
 ask a "unsinn"; expect 'not r["ok"] and "unbekannte Aktion" in r["err"]'
-# Neu in 0.6
+# New in 0.6
 ask q "select 'Grüße € \"x\" ' || char(92) || ' tab' || char(9) || 'ende' as t"; expect 'r["rows"][0]["t"] == "Grüße € " + chr(34) + "x" + chr(34) + " " + chr(92) + " tab" + chr(9) + "ende"'
 ask q "select readfile('/etc/hostname') as f"; expect 'not r["ok"]'
-ask q "select 1 from fsdir('/tmp')"; echo "    (fsdir: im Geraete-sqlite 3.53 trotz -safe erlaubt, nur lesend)"
+ask q "select 1 from fsdir('/tmp')"; echo "    (fsdir: allowed read-only in device sqlite 3.53 even with -safe)"
 ask q ".system echo pwned"; expect 'not r["ok"] or "pwned" not in json.dumps(r)'
 ask q "with recursive c(i) as (select 1 union all select i+1 from c where i < 3000) select i, 'Zeile mit etwas Text und Umlaut ä' as t from c"; expect 'len(r["rows"]) == 3000'
-echo "    (3000 Zeilen = $(wc -c < "$T/reply.json") Bytes JSON)"
-ask s "echo hallo; echo fehler >&2; exit 3"; expect 'r["rows"][0]["rc"] == 3 and "hallo" in r["rows"][0]["out"] and "fehler" in r["rows"][0]["out"]'
+echo "    (3000 rows = $(wc -c < "$T/reply.json") bytes of JSON)"
+ask s "echo hello; echo error >&2; exit 3"; expect 'r["rows"][0]["rc"] == 3 and "hello" in r["rows"][0]["out"] and "error" in r["rows"][0]["out"]'
 ask s 'x=a; b=$(printf "%s" "\\"); printf "%s%s%sc	E
 " "$x" "$b" "$b"'; expect 'r["rows"][0]["out"] == "a" + chr(92) * 2 + "c" + chr(9) + "E" + chr(10)'
-ask s "sleep 5; echo spaet"; expect 'r["rows"][0]["rc"] == 137 and "Zeitlimit" in r["rows"][0]["out"]'
-KEEP=$FAIL; ask q "select 1; select 2"; FAIL=$KEEP; echo "    (zwei Ergebnismengen: kein gueltiges JSON ist bekannt und erlaubt)"
-# Wiederherstellung simulieren
+ask s "sleep 5; echo late"; expect 'r["rows"][0]["rc"] == 137 and "Timeout" in r["rows"][0]["out"]'
+KEEP=$FAIL; ask q "select 1; select 2"; FAIL=$KEEP; echo "    (two result sets: invalid JSON is a known, permitted outcome)"
+# Simulate recovery
 ask w "delete from rigs"
 ask q "select count(*) n from rigs"; expect 'r["rows"][0]["n"] == 0'
 touch "$T/evil/mx5bridge/restore"
 busybox sh "$T/db.sh" prestart
 ask q "select count(*) n from rigs"; expect 'r["rows"][0]["n"] == 2'
 ls "$T/evil/mx5bridge"
-# Absturzschleife simulieren: 3x kurzes Ende mit Code 139 nach Schreibzugriff
+# Simulate a crash loop: three short runs exiting 139 after a write
 ask w "delete from rigs"
 now=$(date +%s)
 busybox sh "$T/db.sh" postexit 139 $now; busybox sh "$T/db.sh" postexit 139 $now; cat "$T/tmp/crashes"; busybox sh "$T/db.sh" postexit 139 $now
 ls "$T/evil/mx5bridge"
 busybox sh "$T/db.sh" prestart
 ask q "select count(*) n from rigs"; expect 'r["rows"][0]["n"] == 2'
-# Neustart-Marker unterdrueckt Absturzzaehlung
+# Restart marker suppresses crash counting
 touch "$T/tmp/restart"; busybox sh "$T/db.sh" postexit 143 $now; ls "$T/tmp"
-# NAM-Mod (0.7): ohne Bibliothek nicht installiert, Umschalten abgelehnt
+# NAM mod (0.7): absent without library; toggling rejected
 rm -f "$T/tmp/restart"
 ask a "status"; expect 'r["rows"][0]["nam_installed"] == 0 and r["rows"][0]["nam_on"] == 0'
 ask a "nam-on"; expect 'not r["ok"] and "nicht enthalten" in r["err"]'
-busybox sh "$T/db.sh" nam && { echo "!!! nam ohne Bibliothek sagt ja"; FAIL=1; } || echo "    ok: nam ohne Bibliothek -> nein"
+busybox sh "$T/db.sh" nam && { echo "!!! nam succeeds without a library"; FAIL=1; } || echo "    ok: nam without library -> disabled"
 mkdir -p "$T/nam"; touch "$T/nam/libnam_preload.so"; printf 'nam_mod_ref=v0.1.6\nnam_instanzen=2\n' > "$T/nam/info.txt"
-busybox sh "$T/db.sh" nam && echo "    ok: nam eingeschaltet -> ja" || { echo "!!! nam sagt nein"; FAIL=1; }
+busybox sh "$T/db.sh" nam && echo "    ok: nam enabled -> yes" || { echo "!!! nam reports disabled"; FAIL=1; }
 ask a "status"; expect 'r["rows"][0]["nam_installed"] == 1 and r["rows"][0]["nam_on"] == 1 and r["rows"][0]["nam_active"] == 1 and r["rows"][0]["nam_ref"] == "v0.1.6"'
 ask a "nam-off"; expect 'r["ok"] and r["rows"][0]["nam_on"] == 0 and r["rows"][0]["restarting"] == 1'
-sleep 1.3   # restart_app laesst erst die Antwort durch
-[ -e "$T/tmp/restart" ] && echo "    ok: Neustart-Marker gesetzt" || { echo "!!! kein Neustart-Marker"; FAIL=1; }
+sleep 1.3   # restart_app lets the reply through first
+[ -e "$T/tmp/restart" ] && echo "    ok: Restart marker set" || { echo "!!! No restart marker"; FAIL=1; }
 rm -f "$T/tmp/restart"
-busybox sh "$T/db.sh" nam && { echo "!!! nam abgeschaltet sagt ja"; FAIL=1; } || echo "    ok: nam abgeschaltet -> nein"
+busybox sh "$T/db.sh" nam && { echo "!!! nam succeeds while disabled"; FAIL=1; } || echo "    ok: nam disabled -> no"
 ask a "status"; expect 'r["rows"][0]["nam_on"] == 0 and r["rows"][0]["nam_active"] == 0 and r["rows"][0]["nam_auto_off"] == 0'
 ask a "nam-on"; expect 'r["ok"] and r["rows"][0]["nam_on"] == 1'
 sleep 1.3; rm -f "$T/tmp/restart"
-# Absturzschleife mit NAM: erst NAM ab (keine Wiederherstellung), ohne NAM dann die Datenbank
+# Crash loop with NAM: disable NAM first (no recovery); without NAM, recover the database
 ask w "delete from rigs where id='r2'"
 busybox sh "$T/db.sh" nam
 busybox sh "$T/db.sh" postexit 139 $now; busybox sh "$T/db.sh" postexit 139 $now; busybox sh "$T/db.sh" postexit 139 $now
-[ "$(cat "$T/evil/mx5bridge/nam-aus" 2>/dev/null)" = auto ] && echo "    ok: NAM vom Absturzwaechter abgeschaltet" || { echo "!!! NAM nicht abgeschaltet"; FAIL=1; }
-[ -e "$T/evil/mx5bridge/restore" ] && { echo "!!! Wiederherstellung trotz NAM angefordert"; FAIL=1; } || echo "    ok: keine Wiederherstellung angefordert"
-busybox sh "$T/db.sh" nam && { echo "!!! nam nach Absturzschleife sagt ja"; FAIL=1; } || echo "    ok: naechster Start ohne NAM"
+[ "$(cat "$T/evil/mx5bridge/nam-aus" 2>/dev/null)" = auto ] && echo "    ok: NAM disabled by crash guard" || { echo "!!! NAM not disabled"; FAIL=1; }
+[ -e "$T/evil/mx5bridge/restore" ] && { echo "!!! Recovery requested despite NAM"; FAIL=1; } || echo "    ok: No recovery requested"
+busybox sh "$T/db.sh" nam && { echo "!!! nam succeeds after a crash loop"; FAIL=1; } || echo "    ok: Next launch without NAM"
 ask a "status"; expect 'r["rows"][0]["nam_on"] == 0 and r["rows"][0]["nam_auto_off"] == 1'
 busybox sh "$T/db.sh" postexit 139 $now; busybox sh "$T/db.sh" postexit 139 $now; busybox sh "$T/db.sh" postexit 139 $now
-[ -e "$T/evil/mx5bridge/restore" ] && echo "    ok: ohne NAM greift die Wiederherstellung" || { echo "!!! keine Wiederherstellung"; FAIL=1; }
+[ -e "$T/evil/mx5bridge/restore" ] && echo "    ok: Recovery takes effect without NAM" || { echo "!!! No recovery"; FAIL=1; }
 busybox sh "$T/db.sh" prestart
-# Aufraeumen nach .done
+# Cleanup after .done
 sleep 0.3
 left=$(ls "$T/tmp" | grep -E '^[qwas][0-9]' || true)
-[ -z "$left" ] && echo "    ok: alle Anfragedateien aufgeraeumt" || { echo "!!! uebrig: $left"; FAIL=1; }
+[ -z "$left" ] && echo "    ok: All request files cleaned up" || { echo "!!! Remaining: $left"; FAIL=1; }
 kill $DPID
 echo
-[ $FAIL -eq 0 ] && echo "ALLES OK" || echo "FEHLER (siehe !!!)"
+[ $FAIL -eq 0 ] && echo "ALL OK" || echo "ERROR (see !!!)"

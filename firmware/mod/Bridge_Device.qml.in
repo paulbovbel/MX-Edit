@@ -5,36 +5,36 @@ import Device 0.1
 
 import QtQuick 2.0
 
-// MX5 Bridge @VERSION@ (inoffiziell)
-// Anfrage: F0 7D 48 52 <seq> <cmd> <ASCII-Nutzdaten> F7
-// Antwort: F0 7D 48 52 <seq> <cmd|0x40> <teil> <teile> <ASCII-Nutzdaten> F7
-//   Langer Kopf (ab 0.6): setzt der PC in <cmd> das Bit 0x20, kommt die Antwort als
-//   ... <cmd|0x40> <teil hi> <teil lo> <teile hi> <teile lo> ... (je 7 Bit, bis 16383 Teile
-//   = ca. 6 MB statt 127 Teile = ca. 48 KB). Ohne das Bit wie bis 0.5 - aeltere PC-Programme
-//   laufen unveraendert.
-//   0x01 PING                              -> "<Version> <Dateiname>"
-//   0x02 GET      "<pfad>"                 -> "<pfad>\t<json>"
-//   0x03 SET      "<pfad>\t<feld>\t<wert>" -> "<pfad>\t<json>"
-//                 Felder: value, unnormalized, state, index, string, user (=Auswahl wie am Display)
-//   0x04 ENTRIES  "<pfad>"                 -> "<pfad>\t<json-liste>"
-//   0x05 GETMANY  "<pfad>\n<pfad>..."      -> "<json-objekt pfad:info>"
-//   0x07 EVAL     "<js-funktionsrumpf>"    -> "<ergebnis>"   (Entwicklerfunktion)
-//   0x08 SQL      "<sql>"                  -> "{ok, rows, err}"  nur lesend, ueber mx5bridge-db.sh
-//                 (Antwort kommt asynchron, sobald der Datenbankdienst geantwortet hat; ab 0.6
-//                 sqlite3 -safe: kein Schreiben in Dateien, keine Shell)
-//   0x09 SQLWRITE "<sql-anweisungen>"      -> "{ok, rows, err}"  schreibend, als eine Transaktion;
-//                 rows = [{changes}]; vor dem ersten Schreiben sichert der Dienst die Datenbank
-//   0x0A ACTION   "status|backup|restore|restart|diag" -> "{ok, rows, err}"  (restore/restart
-//                 beenden die App, die Startschleife startet sie neu - Bridge ca. 15 s weg)
-//   0x0B SHELL    "<shell-skript>"         -> "{ok, rows: [{rc, out}], err}"  als root, Zeitlimit
-//                 60 s (ab 0.6; bis 0.5 lief das ueber .system im SQL-Lesekanal)
-//   Fehler                                 -> 0x7F "<text>"
-//   (0x06 RIG gab es bis 0.4 - App.apiRigs ist in diesem Kontext nicht erreichbar)
-// Zeichen (ab 0.5): SysEx traegt nur 7 Bit. Jedes Zeichen ausser Tab, Zeilenumbruch und
-// 0x20..0x7E geht in beide Richtungen als 0x7F + vier Hex-Ziffern (UTF-16-Einheit, Grossbuchstaben)
-// ueber die Leitung, z. B. U+00FC (ue) -> 7F "00FC"; Zeichen ausserhalb der BMP als zwei Einheiten
-// (Surrogatpaar). 0x7F kommt in normalem Text nicht vor, das Escape ist also eindeutig.
-// Bis 0.4 wurde jedes solche Zeichen zu '?'.
+// MX5 Bridge @VERSION@ (unofficial)
+// Request: F0 7D 48 52 <seq> <cmd> <ASCII payload> F7
+// Reply: F0 7D 48 52 <seq> <cmd|0x40> <part> <total> <ASCII payload> F7
+// Long header (0.6+): if the client sets bit 0x20 in <cmd>, the reply uses
+// ... <cmd|0x40> <part hi> <part lo> <total hi> <total lo> ... (7 bits each, up to 16383 parts
+// = about 6 MB instead of 127 parts/about 48 KB). Without the bit, use the pre-0.6 format
+// so older clients work unchanged.
+//   0x01 PING                              -> "<version> <filename>"
+//   0x02 GET      "<path>"                 -> "<path>\t<json>"
+//   0x03 SET      "<path>\t<field>\t<value>" -> "<path>\t<json>"
+//                 Fields: value, unnormalized, state, index, string, user (= display selection)
+//   0x04 ENTRIES  "<path>"                 -> "<path>\t<json-list>"
+//   0x05 GETMANY  "<path>\n<path>..."      -> "<json-object path:info>"
+//   0x07 EVAL     "<js-function-body>"     -> "<result>" (developer command)
+//   0x08 SQL      "<sql>"                  -> "{ok, rows, err}" read-only, via mx5bridge-db.sh
+//                 (asynchronous reply when the database service responds; 0.6+ uses
+//                 sqlite3 -safe: no file writes or shell)
+//   0x09 SQLWRITE "<sql-statements>"       -> "{ok, rows, err}" writes in one transaction;
+//                 rows = [{changes}]; the service backs up the database before the first write
+//   0x0A ACTION   "status|backup|restore|restart|diag" -> "{ok, rows, err}" (restore/restart
+//                 stop the app; the startup loop relaunches it; bridge unavailable for ~15 s)
+//   0x0B SHELL    "<shell-script>"         -> "{ok, rows: [{rc, out}], err}" as root,
+//                 60 s timeout (0.6+; previously used .system in the SQL read channel)
+//   Errors                                -> 0x7F "<text>"
+//   (0x06 RIG existed through 0.4; App.apiRigs is inaccessible in this context)
+// Characters (0.5+): SysEx carries 7 bits. Every character except TAB, LF and
+// 0x20..0x7E travels in either direction as 0x7F plus four uppercase hex digits per UTF-16 unit,
+// e.g. U+00FC -> 7F "00FC"; non-BMP characters use two units
+// (a surrogate pair). 0x7F never appears in ordinary text, so escaping is unambiguous.
+// Through 0.4, each such character became '?'.
 Device {
 	id: device
 
@@ -48,10 +48,10 @@ Device {
 	property int sqlCount: 0
 	property var sqlPending: ({})   // id -> { seq, base, cmd, long, deadline }
 
-	// Datenbankdienst: Anfrage als Datei ablegen, auf den Marker <base>.rdy warten und die
-	// Antwort aus den Dateinamen von <base>.r lesen (App.entryList). Bis 0.5 wurde eine
-	// JS-Datei importiert - jeder Import liess den Speicher der App um ~2,5 KB wachsen.
-	// Als Property, nicht als Kindobjekt: Device legt Kinder nicht an (id waere undefiniert).
+	// Database service: write a request file, wait for <base>.rdy, then read the
+	// reply from filenames in <base>.r via App.entryList. Through 0.5 a JS file
+	// was imported; each import grew app memory by ~2.5 KB.
+	// Use a property, not a child object: Device does not create children (undefined id).
 	property Timer sqlTimer: Timer {
 		interval: 25
 		repeat: true
@@ -59,8 +59,8 @@ Device {
 		onTriggered: device.pollSql()
 	}
 
-	// kind: "q" lesen (0x08), "w" schreiben (0x09), "a" Aktion (0x0A), "s" Shell (0x0B) - der
-	// Dienst erkennt die Art am Dateinamen; replyCmd ist der Antwortbefehl (cmd|0x40)
+	// kind: 'q' read (0x08), 'w' write (0x09), 'a' action (0x0A), 's' shell (0x0B).
+	// The service infers kind from the filename; replyCmd is the reply command (cmd|0x40).
 	function sqlRequest(seq, sql, kind, replyCmd, longHdr)
 	{
 		sqlCount++;
@@ -73,8 +73,8 @@ Device {
 		sqlTimer.running = true;
 	}
 
-	// Antwort des Dienstes: Dateinamen "<nummer>_<stueck>" sortieren, Stuecke (base64url)
-	// zusammensetzen; Qt.atob liefert den Text schon als Unicode (UTF-8 dekodiert)
+	// Service reply: sort '<number>_<chunk>' filenames and join their base64url chunks.
+	// Qt.atob returns Unicode text already decoded from UTF-8.
 	function readReply(base)
 	{
 		var dir = base + ".r";
@@ -105,14 +105,14 @@ Device {
 				try {
 					text = readReply(p.base);
 				} catch (e) {
-					text = JSON.stringify({ ok: false, rows: [], err: "Antwort nicht lesbar: " + e });
+					text = JSON.stringify({ ok: false, rows: [], err: "Unreadable reply: " + e });
 				}
 				App.writeToFile("done\n", p.base + ".done");
 				delete sqlPending[id];
 				try { reply(p.seq, p.cmd, text, p.long); } catch (e) { errCount++; reply(p.seq, 0x7F, "" + e, p.long); }
 			} else if (Date.now() > p.deadline) {
 				delete sqlPending[id];
-				reply(p.seq, 0x7F, "SQL: keine Antwort vom Datenbankdienst (mx5bridge-db.sh)", p.long);
+				reply(p.seq, 0x7F, "SQL: no reply from database service (mx5bridge-db.sh)", p.long);
 			} else {
 				open = true;
 			}
@@ -120,7 +120,7 @@ Device {
 		sqlTimer.running = open;
 	}
 
-	// nur ins Journal (bis 0.5 zusaetzlich eine Statusdatei auf dem USB-Laufwerk)
+	// Journal only (through 0.5 also wrote a status file on the USB drive)
 	function logStatus(msg)
 	{
 		console.warn("MX5Bridge[" + deviceFileName + "]: " + msg);
@@ -134,7 +134,7 @@ Device {
 		return s.length < 2 ? "0" + s : s;
 	}
 
-	// Text -> 7-Bit-Text: Zeichen ausserhalb von Tab/LF/0x20..0x7E als 0x7F + 4 Hex-Ziffern
+	// Text -> 7-bit text: escape characters outside TAB/LF/0x20..0x7E as 0x7F + four hex digits
 	function escapeText(text)
 	{
 		return text.replace(/[^\t\n\x20-\x7E]/g, function (ch) {
@@ -158,13 +158,13 @@ Device {
 		return out.join(" ");
 	}
 
-	// longHdr: Teilnummer und Teilezahl mit je 14 Bit (zwei Bytes) statt 7 Bit
+	// longHdr: part index and total each use 14 bits (two bytes) instead of 7 bits
 	function reply(seq, cmd, text, longHdr)
 	{
 		text = escapeText(String(text));
 		var total = Math.max(1, Math.ceil(text.length / chunkSize));
 		if (total > (longHdr ? 16383 : 127))
-			throw "Antwort zu gross (" + text.length + " Zeichen)";
+			throw "Reply too large (" + text.length + " characters)";
 		for (var part = 0; part < total; part++) {
 			var chunk = text.substr(part * chunkSize, chunkSize);
 			var msg = "F0 7D 48 52 " + hex2(seq) + " " + hex2(cmd) + " ";
@@ -182,7 +182,7 @@ Device {
 	{
 		var p = App.getProperty(path);
 		if (!p || !p.translator)
-			throw "keine Eigenschaft: " + path;
+			throw "No property: " + path;
 		return p.translator;
 	}
 
@@ -220,7 +220,7 @@ Device {
 		else if (field === "string")
 			t.string = text;
 		else
-			throw "unbekanntes Feld: " + field;
+			throw "Unknown field: " + field;
 	}
 
 	function entriesOf(path)
@@ -229,7 +229,7 @@ Device {
 		var n = t.numEntries;
 		var list = t.entries;
 		if (!list)
-			throw "keine Eintragsliste: " + path;
+			throw "No entry list: " + path;
 		var out = [];
 		for (var i = 0; i < n; i++)
 			out.push(list[i] === undefined ? null : String(list[i]));
@@ -254,7 +254,7 @@ Device {
 		for (var i = 0; i < parts.length; i++)
 			b.push(parseInt(parts[i], 16));
 
-		// Nur eigene Nachrichten: F0 7D 48 52 ...
+		// Accept only our own messages: F0 7D 48 52 ...
 		if (b[0] !== 0xF0 || b[1] !== 0x7D || b[2] !== 0x48 || b[3] !== 0x52)
 			return;
 
@@ -276,7 +276,7 @@ Device {
 			} else if (cmd === 0x03) {
 				var f = payload.split("\t");
 				if (f.length < 3)
-					throw "SET erwartet pfad<TAB>feld<TAB>wert";
+					throw "SET expects path<TAB>field<TAB>value";
 				writeProp(f[0], f[1], f.slice(2).join("\t"));
 				reply(seq, 0x43, f[0] + "\t" + JSON.stringify(infoOf(f[0])), longHdr);
 			} else if (cmd === 0x04) {
@@ -293,28 +293,28 @@ Device {
 				reply(seq, 0x47, toText(fn(App, Midi, device)), longHdr);
 			} else if (cmd === 0x08) {
 				if (!payload.length)
-					throw "SQL erwartet eine Abfrage";
+					throw "SQL expects a query";
 				sqlRequest(seq, payload, "q", 0x48, longHdr);
 			} else if (cmd === 0x09) {
 				if (!payload.length)
-					throw "SQLWRITE erwartet Anweisungen";
+					throw "SQLWRITE expects statements";
 				sqlRequest(seq, payload, "w", 0x49, longHdr);
 			} else if (cmd === 0x0A) {
 				if (!payload.length)
-					throw "ACTION erwartet einen Namen";
+					throw "ACTION expects a name";
 				sqlRequest(seq, payload, "a", 0x4A, longHdr);
 			} else if (cmd === 0x0B) {
 				if (!payload.length)
-					throw "SHELL erwartet ein Skript";
+					throw "SHELL expects a script";
 				sqlRequest(seq, payload, "s", 0x4B, longHdr);
 			} else {
-				throw "unbekannter Befehl " + cmd;
+				throw "Unknown command " + cmd;
 			}
 		} catch (e) {
 			errCount++;
 			reply(seq, 0x7F, "" + e, longHdr);
 			if (errCount < 20)
-				logStatus("Fehler: " + e);
+				logStatus("Error: " + e);
 		}
 	}
 

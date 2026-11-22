@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Minimaler ext4-Leser/-Schreiber in reinem Python - genau so viel, wie der Patcher fuer das
-rootfs des MX5 braucht (ersetzt debugfs, damit die Firmware ohne Linux/WSL gebaut werden kann).
+"""Minimal pure-Python ext4 reader/writer for the MX5 root filesystem.
+Replaces debugfs so firmware can be built without Linux/WSL.
 
-Kann: Dateien lesen, vorhandene regulaere Dateien neu schreiben (gleicher Inode, alte Bloecke
-frei), neue regulaere Dateien in vorhandenen linearen Verzeichnissen anlegen, Modus/uid/gid
-setzen. Haelt Bitmaps, Gruppendeskriptoren, Superblock und alle metadata_csum-Pruefsummen
-(crc32c) aktuell. Kann NICHT: Journal, htree-Verzeichnisse, Extent-Baeume mit Tiefe > 0
-schreiben, 64bit-Deskriptoren - in solchen Faellen bricht er mit einer Meldung ab, statt
-etwas Falsches zu schreiben. Sicherungskopien von Superblock/Deskriptoren bleiben alt (wie bei
-einem Kernel-Mount; e2fsck nimmt immer die primaeren)."""
+Supports reading files, rewriting existing regular files (same inode, freeing
+old blocks), creating regular files in existing linear directories, and setting
+mode/uid/gid. Updates bitmaps, group descriptors, superblock, and metadata_csum
+checksums (crc32c). Does NOT support journals, htree directories, writing extent
+trees deeper than 0, or 64-bit descriptors: these cases fail explicitly rather
+than risk corrupt writes. Backup superblocks/descriptors remain stale, as with
+a kernel mount; e2fsck always uses the primary copies."""
 import struct, time
 
-# ---- crc32c (Castagnoli), roh wie ext4_chksum: ohne Vor-/Nachinvertierung ----
+# ---- crc32c (Castagnoli), raw as in ext4_chksum: no pre/post inversion ----
 _T = []
 for _i in range(256):
     _c = _i
@@ -47,7 +47,7 @@ class Ext4:
         u32 = lambda o: struct.unpack_from("<I", sb, o)[0]
         u16 = lambda o: struct.unpack_from("<H", sb, o)[0]
         if u16(0x38) != 0xEF53:
-            raise Ext4Error("kein ext4-Dateisystem")
+            raise Ext4Error("not an ext4 filesystem")
         self.blocks_count = u32(0x04)
         self.first_data_block = u32(0x14)
         self.bs = 1024 << u32(0x18)
@@ -57,9 +57,9 @@ class Ext4:
         self.inode_size = u16(0x58)
         self.compat, self.incompat, self.ro_compat = u32(0x5C), u32(0x60), u32(0x64)
         if self.incompat & INCOMPAT_64BIT:
-            raise Ext4Error("64bit-Deskriptoren werden nicht unterstuetzt")
+            raise Ext4Error("64-bit descriptors are not supported")
         if self.compat & COMPAT_HAS_JOURNAL:
-            raise Ext4Error("Dateisystem mit Journal wird nicht unterstuetzt")
+            raise Ext4Error("journaled filesystems are not supported")
         self.desc_size = 32
         self.csum = bool(self.ro_compat & RO_COMPAT_METADATA_CSUM)
         if self.incompat & INCOMPAT_CSUM_SEED:
@@ -71,18 +71,18 @@ class Ext4:
         self.now = int(time.time())
 
     def check(self):
-        """Prueft die vorhandenen Pruefsummen (Superblock, alle Deskriptoren) - Selbsttest der
-        crc32c-Berechnung, bevor irgendetwas geschrieben wird."""
+        """Verify existing checksums (superblock and all descriptors): self-test the
+        crc32c calculation before writing anything."""
         if not self.csum:
             return
         sb = self.d[1024:2048]
         if crc32c(0xFFFFFFFF, sb[:0x3FC]) != struct.unpack_from("<I", sb, 0x3FC)[0]:
-            raise Ext4Error("Superblock-Pruefsumme stimmt nicht")
+            raise Ext4Error("superblock checksum mismatch")
         for g in range(self.groups):
             if self._gd_csum(g) != self._gd_get(g, 0x1E, "H"):
-                raise Ext4Error("Deskriptor-Pruefsumme von Gruppe %d stimmt nicht" % g)
+                raise Ext4Error("descriptor checksum mismatch for group %d" % g)
 
-    # ---- Bloecke, Deskriptoren ----
+    # ---- Blocks and descriptors ----
     def block(self, n, count=1):
         return bytes(self.d[n * self.bs:(n + count) * self.bs])
 
@@ -141,7 +141,7 @@ class Ext4:
     def _extents(self, iblock):
         magic, entries, _, depth = struct.unpack_from("<HHHH", iblock, 0)
         if magic != EXT_MAGIC:
-            raise Ext4Error("kein Extent-Kopf")
+            raise Ext4Error("not an extent header")
         out = []
         for i in range(entries):
             e = iblock[12 + 12 * i:24 + 12 * i]
@@ -154,14 +154,14 @@ class Ext4:
         return out
 
     def _blockmap(self, iblock):
-        """Klassische Blockzeiger (ext2/3-Stil, z. B. von libext2fs ohne Extents geschrieben,
-        so legt das Werkzeug der NAM-Mod Dateien an). Liefert (Datenbloecke [(logisch,
-        physisch, 1)], Zeigerbloecke [physisch])."""
+        """Classic block pointers (ext2/3 style, e.g. written without extents by
+        libext2fs, as the NAM tool creates files). Return (data blocks
+        [(logical, physical, 1)], pointer blocks [physical])."""
         ptr = self.bs // 4
         data, meta = [], []
 
         def walk(blk, level, lblk):
-            # level 0 = Datenblock; liefert die Zahl der abgedeckten logischen Bloecke
+            # level 0 = data block; return the number of logical blocks covered
             span = ptr ** level
             if blk == 0:
                 return span
@@ -184,12 +184,12 @@ class Ext4:
         return data, meta
 
     def _data_runs(self, ino):
-        """(Datenbloecke als Laeufe, Zeiger-/Indexbloecke) fuer Extent- und Blockzeiger-Inodes."""
+        """(Data block runs, pointer/index blocks) for extent and block-pointer inodes."""
         flags = struct.unpack_from("<I", ino, 0x20)[0]
         iblock = ino[0x28:0x28 + 60]
         if flags & EXTENTS_FL:
             if struct.unpack_from("<H", iblock, 6)[0] != 0:
-                raise Ext4Error("Extent-Baum mit Tiefe > 0 wird nicht unterstuetzt")
+                raise Ext4Error("extent trees deeper than 0 are not supported")
             return self._extents(iblock), []
         data, meta = self._blockmap(iblock)
         return self._merge(data), meta
@@ -215,18 +215,18 @@ class Ext4:
             buf[start:start + len(chunk)] = chunk
         return mode, bytes(buf)
 
-    # ---- Verzeichnisse ----
+    # ---- Directories ----
     def _dir_blocks(self, n):
         ino = self.inode(n)
         flags = struct.unpack_from("<I", ino, 0x20)[0]
         if flags & INDEX_FL:
-            raise Ext4Error("htree-Verzeichnis (Inode %d) wird nicht unterstuetzt" % n)
+            raise Ext4Error("htree directories (inode %d) are not supported" % n)
         return sorted(self._extents(ino[0x28:0x28 + 60]))
 
     def listdir(self, n):
         mode, data = self.read(n)
         if (mode & 0xF000) != 0x4000:
-            raise Ext4Error("kein Verzeichnis")
+            raise Ext4Error("not a directory")
         out, p = [], 0
         while p + 8 <= len(data):
             ino, rec_len, name_len, ftype = struct.unpack_from("<IHBB", data, p)
@@ -267,7 +267,7 @@ class Ext4:
         tail = o + self.bs - 12
         ino, rec_len, name_len, ft = struct.unpack_from("<IHBB", self.d, tail)
         if (ino, rec_len, name_len, ft) != (0, 12, 0, 0xDE):
-            raise Ext4Error("Verzeichnisblock %d ohne Pruefsummen-Ende" % blk)
+            raise Ext4Error("directory block %d has no checksum tail" % blk)
         gen = struct.unpack_from("<I", self.inode(n), 0x64)[0]
         c = crc32c(crc32c(self.seed, struct.pack("<I", n)), struct.pack("<I", gen))
         struct.pack_into("<I", self.d, tail + 8, crc32c(c, self.d[o:tail]))
@@ -282,10 +282,10 @@ class Ext4:
                 while p < end_limit:
                     e_ino, rec_len, name_len, e_ft = struct.unpack_from("<IHBB", self.d, o + p)
                     if rec_len < 8:
-                        raise Ext4Error("Verzeichnisblock %d ist beschaedigt" % b)
+                        raise Ext4Error("directory block %d is corrupt" % b)
                     used = (8 + name_len + 3) & ~3 if e_ino else 0
                     if rec_len - used >= need:
-                        if e_ino:     # vorhandenen Eintrag kuerzen, neuer kommt dahinter
+                        if e_ino:     # Shrink the existing entry and insert the new one after it
                             struct.pack_into("<IHBB", self.d, o + p, e_ino, used, name_len, e_ft)
                             q, new_len = p + used, rec_len - used
                         else:
@@ -296,7 +296,7 @@ class Ext4:
                         self._dir_csum(dir_ino, b)
                         return
                     p += rec_len
-        # kein Platz: Verzeichnis um einen Block verlaengern
+        # No space: extend the directory by one block
         di = bytearray(self.inode(dir_ino))
         size = self._size(di)
         blk = self._alloc_blocks(1, near=self._dir_blocks(dir_ino)[-1][1])[0][0]
@@ -340,8 +340,8 @@ class Ext4:
         struct.pack_into("<I", self.d, 1024 + off, v)
 
     def _alloc_blocks(self, count, near=0):
-        """Freie Bloecke belegen; liefert [(erster Block, Anzahl)] - moeglichst ein Stueck,
-        hoechstens 4 (so viele Extents passen in den Inode)."""
+        """Allocate free blocks; return [(first block, count)], preferably one run,
+        at most four (the number of extents that fit in an inode)."""
         runs = []
         for g in range(self.groups):
             if self._gd_get(g, 0x12, "H") & BG_BLOCK_UNINIT:
@@ -360,7 +360,7 @@ class Ext4:
                     run = None
             if run:
                 runs.append(tuple(run))
-        # zuerst ein Stueck, das reicht (das naechste zu 'near'), sonst die groessten
+        # Prefer one sufficiently large run (closest to 'near'), otherwise use the largest
         fit = [r for r in runs if r[1] >= count]
         if fit:
             chosen = [(min(fit, key=lambda r: abs(r[0] - near))[0], count)]
@@ -373,15 +373,15 @@ class Ext4:
                 if not left:
                     break
             if left:
-                raise Ext4Error("nicht genug freie Bloecke")
+                raise Ext4Error("not enough free blocks")
         out = []
         for start, ln in chosen:
-            while ln:                       # Extents sind hoechstens 32768 Bloecke lang
+            while ln:                       # Extents contain at most 32768 blocks
                 part = min(ln, MAX_EXT_LEN)
                 out.append((start, part))
                 start, ln = start + part, ln - part
         if len(out) > 4:
-            raise Ext4Error("Datei wuerde mehr als 4 Extents brauchen")
+            raise Ext4Error("file would require more than 4 extents")
         for start, ln in out:
             self._mark_blocks(start, ln, True)
         return out
@@ -393,7 +393,7 @@ class Ext4:
             bm = self._bitmap(g)
             cur = (self.d[bm + (i >> 3)] >> (i & 7)) & 1
             if cur == used:
-                raise Ext4Error("Block %d ist schon %s" % (b, "belegt" if used else "frei"))
+                raise Ext4Error("block %d is already %s" % (b, "allocated" if used else "free"))
             self.d[bm + (i >> 3)] ^= 1 << (i & 7)
             free = self._gd_get(g, 0x0C, "H")
             self._gd_set(g, 0x0C, "H", free - 1 if used else free + 1)
@@ -425,7 +425,7 @@ class Ext4:
                     o = self._inode_off(n)
                     self.d[o:o + self.inode_size] = bytes(self.inode_size)
                     return n
-        raise Ext4Error("kein freier Inode")
+        raise Ext4Error("no free inode")
 
     # ---- Extents ----
     @staticmethod
@@ -441,16 +441,16 @@ class Ext4:
 
     def _set_extents(self, ino, exts):
         if len(exts) > 4:
-            raise Ext4Error("mehr als 4 Extents")
+            raise Ext4Error("more than 4 extents")
         ib = bytearray(60)
         struct.pack_into("<HHHHI", ib, 0, EXT_MAGIC, len(exts), 4, 0, 0)
         for i, (l, p, n) in enumerate(exts):
             struct.pack_into("<IHHI", ib, 12 + 12 * i, l, n, p >> 32, p & 0xFFFFFFFF)
         ino[0x28:0x28 + 60] = ib
 
-    # ---- Schreiben ----
+    # ---- Writing ----
     def write_file(self, path, data, mode, uid=0, gid=0):
-        """Regulaere Datei anlegen oder ersetzen (Inhalt, Modus z. B. 0o100755, Besitzer)."""
+        """Create or replace a regular file (content, mode e.g. 0o100755, owner)."""
         parent, _, name = path.rstrip("/").rpartition("/")
         dir_ino = self.lookup(parent or "/")
         nblk = (len(data) + self.bs - 1) // self.bs
@@ -470,14 +470,14 @@ class Ext4:
             m = struct.unpack_from("<H", ino, 0)[0]
             flags = struct.unpack_from("<I", ino, 0x20)[0]
             if (m & 0xF000) != 0x8000 or flags & INLINE_DATA_FL:
-                raise Ext4Error("%s ist keine einfache Datei" % path)
-            old, meta = self._data_runs(ino)       # die neue Datei bekommt immer Extents
+                raise Ext4Error("%s is not a regular file" % path)
+            old, meta = self._data_runs(ino)       # New files always use extents
             for _, p, ln in old:
                 self._mark_blocks(p, ln, False)
             for p in meta:
                 self._mark_blocks(p, 1, False)
             old_blocks = sum(ln for _, _, ln in old) + len(meta)
-            # i_blocks enthaelt auch einen xattr-Block; nur den Datenanteil abziehen
+            # i_blocks includes an xattr block; subtract only the data portion
             blocks = struct.unpack_from("<I", ino, 0x1C)[0] - old_blocks * (self.bs // 512)
             struct.pack_into("<I", ino, 0x1C, blocks)
             near = old[0][1] if old else 0
@@ -509,7 +509,7 @@ class Ext4:
         self._touch_dir(dir_ino)
 
     def finish(self):
-        """Superblock-Zeit und -Pruefsumme setzen; liefert das Image als bytes."""
+        """Set superblock time and checksum; return the image as bytes."""
         struct.pack_into("<I", self.d, 1024 + 0x30, self.now)      # s_wtime
         if self.csum:
             struct.pack_into("<I", self.d, 1024 + 0x3FC, crc32c(0xFFFFFFFF, self.d[1024:1024 + 0x3FC]))

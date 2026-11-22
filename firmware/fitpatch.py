@@ -105,4 +105,4 @@ if __name__ == '__main__':
         assert verify(new)
         open(sys.argv[5], 'wb').write(new)
     elif cmd == 'verify':
-        print('OK' if verify(open(sys.argv[2], 'rb').read()) else 'FEHLER')
+        print('OK' if verify(open(sys.argv[2], 'rb').read()) else 'ERROR')

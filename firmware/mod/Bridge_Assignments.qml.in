@@ -3,7 +3,7 @@ import InputAssignment 0.1
 import OutputAssignment 0.1
 import QtQuick 2.2
 
-// MX5 Bridge @VERSION@ (inoffiziell). Keine Zuordnungen, nur Marker.
+// MX5 Bridge @VERSION@ (unofficial). No assignments; marker only.
 MidiAssignment {
 	id: assignment
 	objectName: "MX5 Bridge @NAME@"

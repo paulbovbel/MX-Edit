@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""NAM-Mod gefuehrt einbinden (fuer patcher_gui.py): den OFFIZIELLEN Installer der NAM-Mod
-(github.com/lolgab/headrush-nam-mod, GPLv3, wird nicht mitgeliefert) aus deren neuestem Release
-laden, in einem eigenen Arbeitsordner starten und warten, bis er dort
-"HeadRush MX5 Firmware Updater (NAM mod).exe" geschrieben hat. Der Nutzer waehlt im Installer
-MX5 + Instanzen und klickt "Install NAM Mod"; der Installer laedt die Original-Firmware selbst.
+"""Guided NAM installation for patcher_gui.py. Download the OFFICIAL installer
+from the latest release (github.com/lolgab/headrush-nam-mod, GPLv3, not bundled),
+launch it in a separate working folder and wait for its output:
+'HeadRush MX5 Firmware Updater (NAM mod).exe'. The user selects MX5 and instance
+count and clicks 'Install NAM Mod'; the installer downloads stock firmware itself.
 
-Gepruefte Eigenschaften des Installers (Quelle v0.1.6, app/main.c): ignoriert Argumente; 7z.exe
-und ca-bundle.crt sucht er neben seiner EXE (GetModuleFileName), die Ausgabe schreibt er in das
-aktuelle Verzeichnis (getcwd): "HeadRush <Modell> Firmware Updater (NAM mod).exe", danach die
-unveraenderte Kopie "... (stock).exe".
+Verified installer behavior (v0.1.6, app/main.c): ignores arguments; searches for
+7z.exe and ca-bundle.crt next to its executable (GetModuleFileName); writes to
+the current directory (getcwd): 'HeadRush <model> Firmware Updater (NAM mod).exe',
+followed by the unmodified '... (stock).exe' copy.
 
-macOS (Quelle v0.1.6): "headrush-nam-gui-macos" (tar.gz, braucht SDL2 aus Homebrew) schreibt
-"<Name der offiziellen .app> (NAM mod).app" + "(stock).app", z. B. "HeadRush MX5 2.7 Firmware
-Updater (NAM mod).app". Linux: "headrush-nam-gui-linux" (braucht libSDL2) schreibt nur
-"Update_nam.img" (kein Updater - das Modell prueft patcher.build am FIT-Kopf)."""
+macOS (v0.1.6): headrush-nam-gui-macos (tar.gz, requires Homebrew SDL2) writes
+'<official app name> (NAM mod).app' and '(stock).app', e.g. 'HeadRush MX5 2.7
+Firmware Updater (NAM mod).app'. Linux: headrush-nam-gui-linux (requires
+libSDL2) writes only Update_nam.img; patcher.build checks its model in the FIT header."""
 import glob, json, os, shutil, subprocess, sys, tarfile, time, urllib.request, zipfile
 
 REPO = 'lolgab/headrush-nam-mod'
@@ -26,7 +26,7 @@ else:
 LINUX_IMG = 'Update_nam.img'
 OUT_GLOB = 'HeadRush * Firmware Updater (NAM mod)%s' % (SUFFIX or '')
 MX5_NAME = 'HeadRush MX5 Firmware Updater (NAM mod).exe'
-# fehlende Bibliotheken: was der Nutzer installieren muss (README der NAM-Mod)
+# Missing libraries: what the user must install (NAM mod README)
 LIB_HINT = ('On a Mac the NAM installer needs SDL2 from Homebrew: run "brew install sdl2" '
             '(Intel Macs: "brew install curl xz sdl2") and try again.' if sys.platform == 'darwin' else
             'On Linux the NAM installer needs SDL2, e.g. "sudo apt install libsdl2-2.0-0" (Debian/Ubuntu) '
@@ -34,18 +34,18 @@ LIB_HINT = ('On a Mac the NAM installer needs SDL2 from Homebrew: run "brew inst
 
 
 def out_name(device):
-    """Ausgabename des Installers fuer ein Geraet ('MX5', 'Pedalboard', 'Gigboard') unter Windows."""
+    """Installer output filename for a device ('MX5', 'Pedalboard', 'Gigboard') on Windows."""
     return MX5_NAME.replace('MX5', device)
 
 
 def for_device(path, device):
-    """Ausgabe des Installers fuer device? Windows: "HeadRush mx5 Firmware Updater (NAM mod).exe"
-    (klein geschrieben), macOS: "HeadRush MX5 2.7 Firmware Updater (NAM mod).app"."""
+    """Is this installer output for device? Windows: 'HeadRush mx5 Firmware Updater (NAM mod).exe'
+    (lowercase model); macOS: 'HeadRush MX5 2.7 Firmware Updater (NAM mod).app'."""
     return os.path.basename(path).lower().startswith('headrush %s ' % device.lower())
 
 
 def _size(path):
-    """Groesse einer Datei oder eines Ordners (.app) in Bytes."""
+    """File or folder (.app) size in bytes."""
     if not os.path.isdir(path):
         return os.path.getsize(path)
     return sum(os.path.getsize(os.path.join(r, n)) for r, _, fs in os.walk(path) for n in fs)
@@ -63,7 +63,7 @@ class NamError(Exception):
 
 
 def latest_release():
-    """(tag, Download-URL des Windows-Zips, Release-Seite)."""
+    """(tag, Windows ZIP download URL, release page)."""
     req = urllib.request.Request('https://api.github.com/repos/%s/releases/latest' % REPO,
                                  headers={'Accept': 'application/vnd.github+json', 'User-Agent': 'mx5bridge-patcher'})
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -75,8 +75,8 @@ def latest_release():
 
 
 def fetch(base, log, progress):
-    """Installer laden und entpacken (Zwischenspeicher je Version unter base/NAM installer/<tag>);
-    liefert (Pfad der EXE, tag, Release-Seite)."""
+    """Download and extract the installer (per-version cache under base/NAM installer/<tag>).
+    Return (executable path, tag, release page)."""
     tag, url, page = latest_release()
     d = os.path.join(base, 'NAM installer', tag)
     exe = os.path.join(d, EXE)
@@ -103,7 +103,7 @@ def fetch(base, log, progress):
     if ASSET.endswith('.zip'):
         with zipfile.ZipFile(zpath) as z:
             z.extractall(d)
-    else:   # tar.gz behaelt das x-Recht
+    else:   # tar.gz preserves executable permissions
         with tarfile.open(zpath) as t:
             for m in t.getmembers():
                 if not (m.isfile() or m.isdir()) or m.name.startswith('/') or '..' in m.name.split('/'):
@@ -118,7 +118,7 @@ def fetch(base, log, progress):
 
 
 def _stable(path, secs=2.0):
-    """Datei/.app existiert und waechst seit secs nicht mehr (der Installer schreibt sie in einem Zug)."""
+    """File/.app exists and has not grown for secs (the installer writes it in one pass)."""
     try:
         size = _size(path)
     except OSError:
@@ -131,8 +131,8 @@ def _stable(path, secs=2.0):
 
 
 def find_window(pid, timeout=10.0, alive=None):
-    """HWND des sichtbaren Hauptfensters des Prozesses pid (Windows), sonst None; alive() -> False
-    bricht ab (Prozess schon beendet)."""
+    """HWND of process pid's visible main window on Windows, otherwise None.
+    Stop if alive() returns False (process has exited)."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -161,11 +161,12 @@ def find_window(pid, timeout=10.0, alive=None):
 
 
 def run(exe, workdir, log, cancelled, on_window=None, device='MX5'):
-    """Installer im Arbeitsordner starten und auf seine Ausgabe fuer device warten. cancelled() -> True
-    bricht ab. Sobald die Ausgabe fertig ist, wird der Installer geschlossen: sein Fertig-Bildschirm
-    bietet "Open" fuer den reinen NAM-Updater an, und genau den haben Nutzer dann statt des
-    Bridge-Updaters geflasht. on_window(hwnd) bekommt sein Fenster (zum Anordnen).
-    Liefert (Pfad der "(NAM mod).exe/.app" bzw. Update_nam.img, Pfad der "(stock)"-Kopie oder None)."""
+    """Launch the installer in its working folder and wait for output for device.
+    Stop if cancelled() returns True. Close the installer once output is complete:
+    its completion screen offers 'Open' for the NAM-only updater, which users
+    mistakenly flashed instead of the bridge updater. on_window(hwnd) receives
+    its window for positioning. Return (NAM mod .exe/.app or Update_nam.img path,
+    stock copy path or None)."""
     os.makedirs(workdir, exist_ok=True)
     for old in glob.glob(os.path.join(workdir, 'HeadRush * Firmware Updater (*)*')) + [os.path.join(workdir, LINUX_IMG)]:
         _remove(old)
@@ -189,7 +190,7 @@ def run(exe, workdir, log, cancelled, on_window=None, device='MX5'):
         if cancelled():
             raise NamError('Cancelled.')
         made = glob.glob(os.path.join(workdir, OUT_GLOB)) if SUFFIX else []
-        # der Installer schreibt den Modellnamen klein ("HeadRush mx5 ...") - ohne Gross/Klein vergleichen
+        # The installer writes a lowercase model ('HeadRush mx5 ...'); compare case-insensitively
         mx5 = [p for p in made if for_device(p, device)]
         if not SUFFIX and os.path.exists(os.path.join(workdir, LINUX_IMG)):
             mx5 = [os.path.join(workdir, LINUX_IMG)]
@@ -200,12 +201,12 @@ def run(exe, workdir, log, cancelled, on_window=None, device='MX5'):
                     '"Install NAM Mod" again.' % (os.path.basename(p), device, device))
         if mx5 and _stable(mx5[0]):
             stock = mx5[0].replace('(NAM mod)', '(stock)') if SUFFIX else None
-            # die Stock-Kopie schreibt der Installer direkt danach - kurz darauf warten
+            # The installer writes the stock copy immediately afterwards; wait briefly for it
             for _ in range(20 if stock else 0):
                 if os.path.exists(stock) and _stable(stock, 0.5):
                     break
                 time.sleep(0.5)
-            time.sleep(1.0)       # danach raeumt er nur noch seinen Temp-Ordner auf
+            time.sleep(1.0)       # Afterwards it only cleans its temporary folder
             if proc.poll() is None:
                 proc.terminate()
                 log('The NAM installer has built its part - closed it. Now adding the bridge ...')
@@ -217,7 +218,7 @@ def run(exe, workdir, log, cancelled, on_window=None, device='MX5'):
                 continue
             errlog.flush()
             out = open(errlog.name, 'rb').read().decode('utf-8', 'replace').strip()
-            if time.time() - started < 5 and proc.returncode != 0:   # startet gar nicht: meist fehlt SDL2
+            if time.time() - started < 5 and proc.returncode != 0:   # Failure to start usually means SDL2 is missing
                 raise NamError('The NAM mod installer did not start (exit code %s).\n%s\n%s'
                                % (proc.returncode, out[-600:], LIB_HINT if os.name != 'nt' else ''))
             raise NamError('The NAM mod installer was closed before it built the %s updater.' % device)
@@ -225,8 +226,8 @@ def run(exe, workdir, log, cancelled, on_window=None, device='MX5'):
 
 
 def drop_intermediate(path):
-    """Den reinen NAM-Updater (ohne Bridge) nach erfolgreichem Bau loeschen, damit ihn niemand
-    versehentlich startet; der Bridge-Updater enthaelt NAM ja schon."""
+    """Remove the NAM-only updater after a successful build to prevent accidental use;
+    the bridge updater already includes NAM."""
     try:
         if path:
             _remove(path)
@@ -235,7 +236,7 @@ def drop_intermediate(path):
 
 
 def keep_stock(stock, out_parent):
-    """Unveraenderten Original-Updater fuer den Notfall neben den Ausgabeordner legen."""
+    """Place an unmodified stock updater next to the output folder for recovery."""
     if not stock:
         return None
     dest = os.path.join(out_parent, os.path.basename(stock))

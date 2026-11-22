@@ -1,13 +1,13 @@
 #!/bin/sh
-# MX5 Bridge @VERSION@ (inoffiziell) - USB-MIDI ohne USB-Audio
+# MX5 Bridge @VERSION@ (unofficial): USB-MIDI without USB audio
 #
-#   mx5bridge-usb.sh evil-begin [audio|storage]  Evil uebernimmt den USB-Anschluss
-#   mx5bridge-usb.sh evil-end                    Evil gibt den USB-Anschluss frei
-#   mx5bridge-usb.sh daemon                      Hintergrunddienst (gestartet von runevil)
+#   mx5bridge-usb.sh evil-begin [audio|storage]  Evil takes control of USB
+#   mx5bridge-usb.sh evil-end                    Evil releases USB
+#   mx5bridge-usb.sh daemon                      Background service (launched by runevil)
 #
-# Evil (USB-Audio, USB-Transfer) hat immer Vorrang. Der reine MIDI-Anschluss
-# wird nur angelegt, wenn der Anschluss frei ist, und vor jeder Nutzung durch
-# Evil wieder entfernt. Alle Zugriffe laufen unter einer gemeinsamen Sperre.
+# Evil (USB audio/USB Transfer) always takes priority. Create the MIDI-only
+# connection only while USB is free and remove it before every use by Evil.
+# All access shares one lock.
 
 CFG=/sys/kernel/config/usb_gadget
 G=$CFG/mx5b
@@ -29,7 +29,7 @@ gadget_down() {
 	rmdir "$G/functions/midi.mx5bridge" 2>/dev/null
 	rmdir "$G/strings/0x409" 2>/dev/null
 	rmdir "$G" 2>/dev/null
-	log "reiner MIDI-Anschluss entfernt"
+	log "MIDI-only connection removed"
 }
 
 gadget_up() {
@@ -55,12 +55,12 @@ gadget_up() {
 		gadget_down
 		return 1
 	fi
-	log "reiner MIDI-Anschluss aktiv"
+	log "MIDI-only connection active"
 	return 0
 }
 
 usb_mnt_ok() {
-	# USB-Laufwerk auf dem Geraet eingehaengt und nicht an den PC exportiert
+	# USB drive mounted on the device, not exported to the computer
 	grep -qs " $MNT " /proc/mounts && [ ! -e "$CFG/g2" ]
 }
 
@@ -79,27 +79,27 @@ evil-end)
 	flock -u 9
 	;;
 daemon)
-	# nur eine Instanz
+	# Only one instance
 	exec 8>/tmp/mx5bridge.daemon.lock
 	flock -n 8 || exit 0
 	sleep 25
 	exec 9>"$LOCK"
 	flock 9
-	# Hinweisdatei auf dem USB-Laufwerk nur schreiben, wenn sie fehlt oder veraltet ist (bis 0.5
-	# bei jedem Start, dazu eine Diagnose - die gibt es jetzt auf Anfrage: Aktion 'diag')
-	if usb_mnt_ok && [ "$(head -n 1 "$DIR/firmware_aktiv.txt" 2>/dev/null)" != "MX5 Bridge @VERSION@ ist aktiv." ]; then
+	# Write the USB-drive notice only if missing or outdated (through 0.5: every
+	# startup, plus diagnostics; diagnostics are now requested through action 'diag')
+	if usb_mnt_ok && [ "$(head -n 1 "$DIR/firmware_aktiv.txt" 2>/dev/null)" != "MX5 Bridge @VERSION@ is active." ]; then
 		mkdir -p "$DIR"
 		{
-			echo "MX5 Bridge @VERSION@ ist aktiv."
+			echo "MX5 Bridge @VERSION@ is active."
 			echo
-			echo "USB-MIDI ohne USB-Audio abschalten: in diesem Ordner eine Datei"
-			echo "usb_midi_aus.txt anlegen und das @DEVICE@ neu starten."
+			echo "To disable USB-MIDI without USB audio, create a file named"
+			echo "usb_midi_aus.txt in this folder and restart the @DEVICE@."
 		} > "$DIR/firmware_aktiv.txt"
 		sync
 	fi
 	flock -u 9
 	if [ -e "$OFF_SWITCH" ]; then
-		log "abgeschaltet durch $OFF_SWITCH"
+		log "disabled by $OFF_SWITCH"
 		exit 0
 	fi
 	idle=0
@@ -118,21 +118,21 @@ daemon)
 					fails=0
 				else
 					fails=$((fails + 1))
-					log "Anlegen fehlgeschlagen ($fails)"
+					log "Creation failed ($fails)"
 				fi
 				idle=0
 			fi
 		fi
 		flock -u 9
 		if [ $fails -ge 3 ]; then
-			log "zu viele Fehler, Pause"
+			log "Too many errors; pausing"
 			sleep 120
 			fails=0
 		fi
 	done
 	;;
 *)
-	echo "Aufruf: $0 evil-begin [audio|storage] | evil-end | daemon" >&2
+	echo "Usage: $0 evil-begin [audio|storage] | evil-end | daemon" >&2
 	exit 2
 	;;
 esac

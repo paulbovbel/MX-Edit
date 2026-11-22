@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""MX5 Bridge firmware patcher - window version (tkinter, look of the MX5 Editor).
+"""MX5 Bridge firmware patcher: tkinter GUI styled like MX-Edit.
 
-Aufruf:  python patcher_gui.py [Datei]     (Datei = vorausgewaehlte eigene Firmware, z. B. per
-                                           Drag & Drop auf die EXE)
-Optionen: eigene Firmware-Datei statt Download (offizieller Updater .exe/.zip oder ein Updater
-des NAM-Installers) und NAM-Mod gefuehrt mitinstallieren (naminstaller.py). Die Arbeit laeuft in
-einem Thread (patcher.build); Ausgaben kommen ueber patcher.LOG/PROGRESS und eine Queue in die
-Oberflaeche. Die Konsolenversion bleibt patcher.py."""
+Usage: python patcher_gui.py [file] (preselected custom firmware, e.g. dropped
+onto the executable). Options: custom firmware instead of downloading (official
+.exe/.zip or NAM installer output), and guided NAM installation (naminstaller.py).
+Work runs in a thread (patcher.build); patcher.LOG/PROGRESS feed the UI through
+a queue. patcher.py remains the console version."""
 import os, queue, subprocess, sys, threading, time, webbrowser
 import tkinter as tk
 from tkinter import filedialog, ttk, messagebox
@@ -22,7 +21,7 @@ WARN, WARN_BG = "#f5a524", "#2a2112"
 MAC, WIN = sys.platform == "darwin", sys.platform == "win32"
 SANS = "Segoe UI" if WIN else ("Helvetica Neue" if MAC else "DejaVu Sans")
 MONO = "Consolas" if WIN else ("Menlo" if MAC else "DejaVu Sans Mono")
-# was der NAM-Installer auf diesem System baut (naminstaller.SUFFIX) - fuer die Texte
+# NAM installer output on this platform (naminstaller.SUFFIX), for display text
 NAM_OUT = {".exe": "Firmware Updater (NAM mod).exe", ".app": "2.7 Firmware Updater (NAM mod).app"}.get(
     naminstaller.SUFFIX)
 NAM_STEPS = ("1.  Choose MX5 and the number of NAM instances.\n"
@@ -36,15 +35,15 @@ def nam_steps(device):
 
 
 def open_path(p):
-    """Datei/Ordner mit dem Standardprogramm des Systems oeffnen (Explorer, Finder, Dateimanager)."""
+    """Open a file/folder with the system default (Explorer, Finder, file manager)."""
     if WIN:
         os.startfile(p)
     else:
         subprocess.Popen(["open" if MAC else "xdg-open", p])
 
 
-# Geraete in der Reihenfolge der Auswahl (bridgepatch.MODELS: MX5 geprueft, die anderen experimentell)
-MODELS = bridgepatch.offered()      # Hauptausgabe: MX5 + Pedalboard (Beta), Testausgabe auch Gigboard
+# Device selection order (bridgepatch.MODELS: MX5 verified, others experimental)
+MODELS = bridgepatch.offered()      # Main release: MX5 and Pedalboard beta; testing release also includes Gigboard
 NAM_URL = "https://github.com/lolgab/headrush-nam-mod"
 VERSION = bridgepatch.VERSION
 
@@ -58,7 +57,7 @@ def dpi_aware():
 
 
 class Check(tk.Frame):
-    """Haken mit Beschriftung im dunklen Stil (tk.Checkbutton sieht dort fremd aus)."""
+    """Labeled dark-style checkbox (tk.Checkbutton looks out of place)."""
 
     def __init__(self, parent, text, command=None, bg=PANEL):
         super().__init__(parent, bg=bg)
@@ -105,7 +104,7 @@ class Check(tk.Frame):
 
 
 class Btn(tk.Label):
-    """Flache Schaltflaeche (primary = Akzentfarbe)."""
+    """Flat button (primary uses the accent color)."""
 
     def __init__(self, parent, text, command, primary=False, bg=PANEL):
         self.colors = (ACCENT, ACCENT_HI, ACCENT_TXT) if primary else (CARD, LINE, TEXT)
@@ -127,7 +126,7 @@ class PatcherApp(tk.Tk):
     def __init__(self, preset=None):
         dpi_aware()
         super().__init__()
-        if MAC:   # aqua rechnet mit 72 dpi: auf 96 wie Windows, sonst wird alles ein Viertel kleiner
+        if MAC:   # Aqua uses 72 dpi; scale to Windows-like 96 dpi to avoid a 25% size reduction
             self.tk.call("tk", "scaling", 96.0 / 72.0)
         self.scale = self.winfo_fpixels("1i") / 96.0
         px = lambda v: int(v * self.scale)
@@ -157,7 +156,7 @@ class PatcherApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(50, self.pump)
         self.after(10, self.dark_title)
-        if os.environ.get("MX5B_AUTOSTART") == "1":     # nur fuer Tests der EXE: gleich bauen
+        if os.environ.get("MX5B_AUTOSTART") == "1":     # Executable testing only: build immediately
             self.after(500, self.start)
 
     def dark_title(self):
@@ -166,12 +165,12 @@ class PatcherApp(tk.Tk):
             hwnd = ctypes.windll.user32.GetParent(self.winfo_id()) or self.winfo_id()
             on = ctypes.c_int(1)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(on), ctypes.sizeof(on))
-            self.withdraw()       # Titelleiste neu zeichnen lassen
+            self.withdraw()       # Request a title bar redraw
             self.deiconify()
         except Exception:
             pass
 
-    # ---------------- Aufbau ----------------
+    # ---------------- Layout ----------------
     def card(self, parent, title):
         f = tk.Frame(parent, bg=PANEL, padx=self.px(20), pady=self.px(16))
         f.pack(fill="x", pady=(0, self.px(12)))
@@ -193,7 +192,7 @@ class PatcherApp(tk.Tk):
         root.pack(fill="both", expand=True)
         head = tk.Frame(root, bg=BG)
         head.pack(fill="x", pady=(0, px(14)))
-        logo = bridgepatch.BRAND.split()[0]          # "MX5" bzw. "HeadRush" (Testausgabe)
+        logo = bridgepatch.BRAND.split()[0]          # 'MX5' or 'HeadRush' (testing release)
         tk.Label(head, text=logo, bg=BG, fg=ACCENT, font=(SANS, 22, "bold")).pack(side="left")
         tk.Label(head, text="  Bridge %s · Firmware Patcher" % VERSION, bg=BG, fg=TEXT,
                  font=(SANS, 16)).pack(side="left", pady=(px(4), 0))
@@ -211,7 +210,7 @@ class PatcherApp(tk.Tk):
                  bg=BG, fg=MUTED, font=(SANS, 10), anchor="w", justify="left",
                  wraplength=px(660)).pack(fill="x", pady=(0, px(14)))
 
-        # Gross sichtbar, solange der NAM-Installer laeuft (Nutzer flashten sonst dessen Updater)
+        # Prominent while NAM installer runs, to prevent flashing its NAM-only updater
         self.banner = tk.Frame(root, bg=WARN_BG, padx=px(20), pady=px(16), highlightthickness=2,
                                highlightbackground=WARN)
         self.banner_title = tk.Label(self.banner, text="", bg=WARN_BG, fg=WARN, font=(SANS, 14, "bold"),
@@ -221,11 +220,11 @@ class PatcherApp(tk.Tk):
                                     anchor="w", justify="left", wraplength=px(640))
         self.banner_text.pack(fill="x", pady=(px(8), 0))
 
-        # Optionen in einem eigenen Rahmen: nach dem Erfolg ersetzt der Ergebniskasten sie
+        # Options have their own frame; after success the result panel replaces it
         self.opts = tk.Frame(root, bg=BG)
         self.opts.pack(fill="x")
         c = self.card(self.opts, "Device")
-        if len(MODELS) < 2:          # Hauptausgabe: nur das MX5 - keine Auswahl zeigen
+        if len(MODELS) < 2:          # Main release: MX5 only; hide device selection
             c.pack_forget()
         row = tk.Frame(c, bg=PANEL)
         row.pack(fill="x", pady=(px(10), 0))
@@ -303,9 +302,9 @@ class PatcherApp(tk.Tk):
         self.log.tag_configure("err", foreground=DANGER)
         self.log.tag_configure("ok", foreground=ACCENT)
 
-    # ---------------- Zustand ----------------
+    # ---------------- State ----------------
     def pick_model(self, m):
-        """Geraeteauswahl wie Optionsfelder: genau eines ist gewaehlt."""
+        """Device selection behaves like radio buttons: exactly one selected."""
         if self.busy:
             return
         if m["key"] != self.model["key"]:
@@ -385,7 +384,7 @@ class PatcherApp(tk.Tk):
             self.out_parent = os.path.normpath(p)
             self.refresh()
 
-    # ---------------- Ausgabe aus dem Arbeits-Thread ----------------
+    # ---------------- Worker-thread output ----------------
     def post(self, kind, *a):
         self.q.put((kind, a))
 
@@ -423,7 +422,7 @@ class PatcherApp(tk.Tk):
         if line and tag != "err":
             self.status.configure(text=line[:90])
 
-    # ---------------- Ablauf ----------------
+    # ---------------- Workflow ----------------
     def start(self):
         if self.busy:
             return
@@ -479,16 +478,16 @@ class PatcherApp(tk.Tk):
             self.post("finished", True, out, found_nam, missing, kept, found)
         except (patcher.Fail, bridgepatch.PatchError, ext4.Ext4Error, naminstaller.NamError) as e:
             self.post("finished", False, str(e))
-        except Exception as e:     # Netz, Dateien ... - dem Nutzer zeigen statt still zu sterben
+        except Exception as e:     # Network/file errors: show the user instead of failing silently
             self.post("finished", False, "%s: %s" % (type(e).__name__, e))
 
     def show_banner(self, title, text, front=False):
         self.banner_title.configure(text=title)
         self.banner_text.configure(text=text)
-        self.opts.pack_forget()      # gesperrt und mit derselben Anleitung - Platz fuer Banner + Protokoll
+        self.opts.pack_forget()      # Locked with the same instructions; leave room for banner and log
         self.banner.pack(fill="x", pady=(0, self.px(12)), before=self.bar)
-        if front:     # nach dem Schliessen des NAM-Installers den Patcher nach vorn holen
-            self.btn_cancel.pack_forget()     # Abbrechen wirkt nur beim Warten auf den Installer
+        if front:     # Bring the patcher forward after closing the NAM installer
+            self.btn_cancel.pack_forget()     # Cancellation only applies while waiting for the installer
             self.deiconify()
             self.lift()
             self.attributes("-topmost", True)
@@ -496,8 +495,8 @@ class PatcherApp(tk.Tk):
             self.focus_force()
 
     def arrange(self, hwnd):
-        """NAM-Installer und Patcher nebeneinander legen, damit die Anleitung sichtbar bleibt
-        (nur wenn beide auf den Arbeitsbereich passen)."""
+        """Place the NAM installer and patcher side by side so instructions stay visible,
+        but only if both windows fit in the work area."""
         try:
             import ctypes
             from ctypes import wintypes
@@ -541,7 +540,7 @@ class PatcherApp(tk.Tk):
         if kept:
             self.write("Kept the unmodified official updater for emergencies: " + kept)
         self.status.configure(text="Done.", fg=ACCENT)
-        for w in (self.logf, self.opts, self.bar, self.prog):     # Ergebnisansicht statt Optionen
+        for w in (self.logf, self.opts, self.bar, self.prog):     # Show results instead of options
             w.pack_forget()
         self.done = tk.Frame(self.root_frame, bg=BG)
         self.done.pack(fill="x")
@@ -561,7 +560,7 @@ class PatcherApp(tk.Tk):
             if app:
                 steps += ("\nIf macOS refuses to open the updater: right-click it in the folder › Open, or allow it "
                           "under System Settings › Privacy & Security.")
-        else:   # Linux: HeadRush hat keinen Linux-Updater - der Ordner ist der Windows-Updater
+        else:   # Linux: HeadRush has no Linux updater; this folder contains the Windows updater
             steps = ("HeadRush has no firmware updater for Linux – this folder is the Windows updater.\n"
                      "1. Copy the folder to a Windows PC (or use a Windows virtual machine with the USB device "
                      "passed through).\n"
@@ -601,18 +600,18 @@ class PatcherApp(tk.Tk):
         self.fit_height()
 
     def fit_height(self):
-        """Fenster so weit vergroessern, dass der Ergebniskasten ganz zu sehen ist (hoechstens bis
-        zur Bildschirmhoehe); verkleinert nie."""
+        """Enlarge the window until the entire result panel is visible, up to screen
+        height. Never shrink it."""
         self.update_idletasks()
         need = self.root_frame.winfo_reqheight()
         have = self.winfo_height()
-        top = self.winfo_rooty() - self.winfo_y()      # Hoehe der Titelleiste
+        top = self.winfo_rooty() - self.winfo_y()      # Title bar height
         room = self.winfo_screenheight() - self.winfo_y() - top - self.px(60)
         if need > have:
             self.geometry("%dx%d" % (self.winfo_width(), min(need, max(have, room))))
 
     def show_options(self):
-        """Zurueck zu den Optionen (Ergebniskasten weg, Protokoll wieder da)."""
+        """Return to options: hide results and restore the log."""
         if self.done:
             self.done.destroy()
             self.done = None
@@ -642,7 +641,7 @@ class PatcherApp(tk.Tk):
                 bridgepatch.BRAND, "The patcher is still working. Quit anyway?", parent=self):
             return
         self.destroy()
-        os._exit(0)     # laufende Arbeits-Threads (Download, Komprimieren) nicht abwarten
+        os._exit(0)     # Do not wait for running download/compression worker threads
 
 
 def main():

@@ -1,7 +1,7 @@
 #!/bin/sh
-# Baut ein statisches sqlite3 (Kommandozeile) fuer das MX5 (ARM 32 Bit, hard-float).
-# Laeuft unter Linux/WSL (Ubuntu):  sudo apt install gcc-arm-linux-gnueabihf unzip wget
-# Ergebnis: ../bin/sqlite3  (wird von build.py als /usr/Evil/Scripts/mx5bridge-sqlite3 eingebaut)
+# Build a static sqlite3 CLI for MX5 (32-bit ARM, hard-float).
+# Linux/WSL (Ubuntu): sudo apt install gcc-arm-linux-gnueabihf unzip wget
+# Output: ../bin/sqlite3 (build.py installs it as /usr/Evil/Scripts/mx5bridge-sqlite3)
 set -e
 cd "$(dirname "$0")"
 VER=3530400
@@ -11,7 +11,7 @@ mkdir -p ../bin work
 cd work
 [ -e "sqlite-amalgamation-$VER.zip" ] || wget -q "$URL"
 echo "$SHA3  sqlite-amalgamation-$VER.zip" | sha3sum -a 256 -c - 2>/dev/null || \
-	echo "(sha3sum nicht verfuegbar oder Pruefsumme abweichend - bitte manuell pruefen)"
+	echo "(sha3sum unavailable or checksum mismatch; please verify manually)"
 unzip -qo "sqlite-amalgamation-$VER.zip"
 cd "sqlite-amalgamation-$VER"
 arm-linux-gnueabihf-gcc -Os -static -o ../../../bin/sqlite3 shell.c sqlite3.c \
@@ -20,4 +20,4 @@ arm-linux-gnueabihf-gcc -Os -static -o ../../../bin/sqlite3 shell.c sqlite3.c \
 arm-linux-gnueabihf-strip ../../../bin/sqlite3
 ls -l ../../../bin/sqlite3
 file ../../../bin/sqlite3 2>/dev/null || true
-echo "Fertig: bin/sqlite3"
+echo "Done: bin/sqlite3"

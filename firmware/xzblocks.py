@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""xz-Datei wie das Original-rootfs des MX5 schreiben, nur mit Pythons lzma-Modul:
-ein Stream, CRC32-Pruefsumme, LZMA2 mit 64-MiB-Woerterbuch (preset 6e), 128-MiB-Bloecke mit
-komprimierter und unkomprimierter Groesse im Blockkopf (wie 'xz -T2 --block-size=134217728').
-Pythons lzma kann keine Bloecke mit Groessen im Kopf schreiben, darum wird jeder Block roh
-(FORMAT_RAW) komprimiert und der xz-Container (Stream-Kopf, Blockkoepfe, Index, Fuss) hier
-nach der xz-Spezifikation 1.0.4 zusammengesetzt. Die Bloecke laufen parallel in Threads
-(lzma gibt das GIL frei)."""
+"""Write an xz file like the stock MX5 rootfs using only Python's lzma module:
+one stream, CRC32, LZMA2 with a 64 MiB dictionary (preset 6e), 128 MiB blocks
+with compressed/uncompressed sizes in their headers (like
+'xz -T2 --block-size=134217728'). Python lzma cannot write block header sizes,
+so compress each block with FORMAT_RAW and assemble the xz container (stream
+header, block headers, index, footer) following xz specification 1.0.4.
+Blocks run in parallel threads because lzma releases the GIL."""
 import lzma, struct, zlib
 from concurrent.futures import ThreadPoolExecutor
 
@@ -24,7 +24,7 @@ def _vli(n):
 
 
 def _dict_prop(size):
-    # LZMA2-Eigenschaftsbyte: kleinster Wert, dessen Woerterbuch >= size ist
+    # LZMA2 property byte: smallest value whose dictionary is >= size
     for p in range(40):
         if (2 | (p & 1)) << (p // 2 + 11) >= size:
             return p
@@ -37,9 +37,9 @@ def _raw(chunk):
 
 
 def _block(chunk, comp):
-    flags = 0x00 | 0x40 | 0x80              # 1 Filter, komprimierte + unkomprimierte Groesse
+    flags = 0x00 | 0x40 | 0x80              # One filter, compressed and uncompressed sizes
     body = bytes([flags]) + _vli(len(comp)) + _vli(len(chunk))
-    body += _vli(0x21) + _vli(1) + bytes([_dict_prop(DICT)])   # Filter LZMA2, 1 Byte Eigenschaft
+    body += _vli(0x21) + _vli(1) + bytes([_dict_prop(DICT)])   # LZMA2 filter, one property byte
     size = 1 + len(body) + 4
     size = (size + 3) & ~3
     hdr = bytes([size // 4 - 1]) + body

@@ -18,20 +18,20 @@ und komprimiert mit xzblocks.py wie das Original. Was geaendert wird: bridgepatc
 import argparse, hashlib, json, lzma, os, shutil, stat, subprocess, sys, tempfile, time, urllib.request, zipfile, zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-# Download und Ausgabe neben das Skript bzw. die EXE (in der EXE ist HERE ein temporaerer
-# Entpackordner, der beim Beenden geloescht wird; mod/ und bin/ liest bridgepatch von dort)
+# Downloads and output go next to the script/executable (in a packaged executable, HERE is
+# a temporary extraction folder removed at exit; bridgepatch reads mod/ and bin/ there).
 FROZEN = getattr(sys, 'frozen', False)
 BASE = os.path.dirname(os.path.abspath(sys.executable)) if FROZEN else HERE
-if FROZEN and sys.platform == 'darwin':   # .app: nicht ins Programmbuendel schreiben (das liegt oft schreibgeschuetzt)
+if FROZEN and sys.platform == 'darwin':   # .app: do not write inside the application bundle, which is often read-only
     BASE = os.path.join(os.path.expanduser('~/Downloads'), 'MX5Bridge_Patcher')
     os.makedirs(BASE, exist_ok=True)
 import bridgepatch, ext4, fitpatch, sevenzip, xzblocks
 
-MODEL_KEYS = [m['key'] for m in bridgepatch.offered()]   # mx5 (+ pedalboard, gigboard in der Testausgabe)
+MODEL_KEYS = [m['key'] for m in bridgepatch.offered()]   # mx5 (plus pedalboard and gigboard in the testing release)
 UPDATER_FILES = ('FirmwareUpdater.exe', 'libusb-1.0.dll', 'Background.png')
-# Ausgabe: unter macOS der offizielle Mac-Updater (.app) mit neuem Update.img, sonst der Windows-
-# Updater-Ordner (fuer Linux gibt es keinen HeadRush-Updater: dort bauen, unter Windows/macOS oder in
-# einer VM mit USB-Durchreichung flashen)
+# Output: on macOS, the official Mac updater (.app) with a new Update.img; otherwise
+# the Windows updater folder (HeadRush has no Linux updater: build there and flash
+# from Windows/macOS or a VM with USB passthrough).
 TARGETS = ('win', 'mac')
 TARGET = 'mac' if sys.platform == 'darwin' else 'win'
 SIG7Z = b"7z\xbc\xaf\x27\x1c"
@@ -41,9 +41,9 @@ def _print_progress(got, total):
     print('  %3d %%  (%d of %d MB)' % (got * 100 // total, got >> 20, total >> 20), flush=True)
 
 
-# Ausgabe-Haken: Konsole (print) oder GUI (patcher_gui setzt eigene Funktionen)
+# Output hooks: console (print) or GUI (patcher_gui supplies its own functions)
 LOG = [lambda text: print(text, flush=True)]
-PROGRESS = [_print_progress]      # (empfangen, gesamt) in Bytes, hoechstens einmal pro Sekunde
+PROGRESS = [_print_progress]      # (received, total) in bytes, at most once per second
 
 
 def say(*a):
@@ -54,7 +54,7 @@ class Fail(Exception):
     pass
 
 
-# ---- Eingabe besorgen ----
+# ---- Obtain input ----
 def download(dest, model, target='win'):
     url = model['mac_url'] if target == 'mac' else model['url']
     say('Downloading the official HeadRush %s 2.7 %s updater from inMusic ...'
@@ -78,8 +78,8 @@ def download(dest, model, target='win'):
 
 
 def sfx_archive(exe):
-    """7z-Archiv aus einem 7z-SFX-Updater schneiden (der Stub enthaelt die Signatur auch als
-    Text - gueltig ist die Stelle, deren Startkopf-CRC stimmt)."""
+    """Extract the 7z archive from a 7z-SFX updater. The stub also contains the
+    signature as text; only the position with a valid start-header CRC is accepted."""
     d = open(exe, 'rb').read()
     i = -1
     while True:
@@ -92,8 +92,8 @@ def sfx_archive(exe):
 
 
 def extract_7z(archive, dest):
-    """Zuerst der eigene Entpacker (sevenzip.py); das tar.exe von Windows 10 / aelteren Windows-11-
-    Builds kann kein LZMA (libarchive ohne liblzma) - externe Programme nur noch als Rueckfall."""
+    """Try sevenzip.py first. Windows 10/older Windows 11 tar.exe lacks LZMA support
+    (libarchive without liblzma); external programs are only fallbacks."""
     try:
         sevenzip.extract(open(archive, 'rb').read(), dest)
         if os.path.exists(os.path.join(dest, 'Update.img')):
@@ -110,7 +110,7 @@ def extract_7z(archive, dest):
             tools.append([exe, 'x', '-y', '-o' + dest, archive])
     if shutil.which('bsdtar'):
         tools.append(['bsdtar', '-xf', archive, '-C', dest])
-    flags = 0x08000000 if os.name == 'nt' else 0      # CREATE_NO_WINDOW: kein Konsolenblitz in der GUI
+    flags = 0x08000000 if os.name == 'nt' else 0      # CREATE_NO_WINDOW: avoid a console flash in the GUI
     for cmd in tools:
         try:
             r = subprocess.run(cmd, capture_output=True, creationflags=flags)
@@ -125,13 +125,13 @@ def extract_7z(archive, dest):
 
 
 def app_resources(app):
-    """Contents/Resources eines Mac-Updaters (.app), wenn dort ein Update.img liegt, sonst None."""
+    """Mac updater's Contents/Resources if it contains Update.img, otherwise None."""
     r = os.path.join(app, 'Contents', 'Resources')
     return r if os.path.exists(os.path.join(r, 'Update.img')) else None
 
 
 def find_app(d):
-    """Erste .app mit Update.img in d (oder d selbst)."""
+    """First .app containing Update.img inside d (or d itself)."""
     if d.lower().rstrip('/\\').endswith('.app') and app_resources(d):
         return d
     for n in sorted(os.listdir(d)):
@@ -142,8 +142,8 @@ def find_app(d):
 
 
 def extract_zip_modes(z, dest):
-    """Zip entpacken und dabei Unix-Rechte und symbolische Links behalten (zipfile setzt beides nicht;
-    der Mac-Updater braucht das x-Recht seines Programms)."""
+    """Extract ZIP preserving Unix permissions and symbolic links, unlike zipfile;
+    the Mac updater needs its executable permission."""
     for i in z.infolist():
         mode = i.external_attr >> 16
         target = os.path.join(dest, *i.filename.split('/'))
@@ -159,8 +159,8 @@ def extract_zip_modes(z, dest):
 
 
 def unpack(src, work):
-    """Liefert (Ordner mit Update.img und, wenn vorhanden, den Updater-Dateien; .app des Mac-
-    Updaters oder None)."""
+    """Return (folder containing Update.img and any updater files,
+    Mac updater .app or None)."""
     if os.path.isdir(src):
         app = find_app(src)
         if app:
@@ -176,7 +176,7 @@ def unpack(src, work):
         return d, None
     if low.endswith('.zip'):
         with zipfile.ZipFile(src) as z:
-            if any('.app/' in n.lower() for n in z.namelist()):     # Mac-Updater
+            if any('.app/' in n.lower() for n in z.namelist()):     # Mac updater
                 say('Unpacking %s ...' % os.path.basename(src))
                 d = os.path.join(work, 'mac')
                 os.makedirs(d)
@@ -200,9 +200,9 @@ def unpack(src, work):
     return d, None
 
 
-# ---- Patchen ----
+# ---- Patching ----
 def model_of(raw):
-    """Modell aus dem FIT-Kopf des Update.img ('compatible' = inmusic,hg04 / mg01 / hg02)."""
+    """Model from Update.img's FIT header ('compatible' = inmusic,hg04 / mg01 / hg02)."""
     _, props = fitpatch.parse(raw)
     _, _, _, off, ln = fitpatch.get(props, '', 'compatible')
     return bridgepatch.model_of_fit(raw[off:off + ln].rstrip(b'\0').decode('ascii', 'replace'))
@@ -230,7 +230,7 @@ def patch(raw, nam_info=None, need_nam=False, device=None):
         fs.write_file(target, data, mode)
     new_img = fs.finish()
 
-    # Zuruecklesen aus einem frisch geparsten Image
+    # Read back from a freshly parsed image
     check = ext4.Ext4(new_img)
     check.check()
     for target, (data, mode) in files.items():
@@ -252,10 +252,10 @@ def patch(raw, nam_info=None, need_nam=False, device=None):
 
 
 def config_json(nam, device='MX5', original=None, ascii=False):
-    """Config.json des Updaters. original: die des offiziellen Updaters (Text) - dann bleibt alles
-    ausser Titel und Startknopf wie bei HeadRush (beim Gigboard steht z. B. "HeadRush Gigboard "
-    mit Leerzeichen als deviceName; ob der Updater das Geraet daran erkennt, ist unbekannt).
-    ascii: Sonderzeichen als JSON-Escapes (Mac-Updater: dessen Original ist cp1252, nicht UTF-8)."""
+    """Updater Config.json. original: official updater's text; preserve everything
+    except the title and start button. E.g. Gigboard uses 'HeadRush Gigboard '
+    with a trailing space as deviceName; whether identification depends on it is
+    unknown. ascii: escape non-ASCII JSON characters (Mac original is cp1252, not UTF-8)."""
     title = '%s %s%s' % (bridgepatch.label(device), bridgepatch.VERSION, ' + NAM' if nam else '')
     if original:
         try:
@@ -305,7 +305,7 @@ def install_hint(out, nam, device='MX5', target='win', app=None):
 
 
 def risk_note(model):
-    """Warnung fuer Modelle, auf denen die Bruecke noch nicht geprueft ist (None = MX5)."""
+    """Warning for models not yet verified with the bridge (None = MX5)."""
     if model['tested']:
         return None
     rec = ('If it does not start any more: %s and flash the official updater.' % model['recovery']
@@ -318,7 +318,7 @@ def risk_note(model):
 
 
 def beta_note(model):
-    """Hinweis fuer Modelle, deren Unterstuetzung noch Beta ist (Pedalboard), sonst None."""
+    """Notice for beta device support (Pedalboard), otherwise None."""
     if not model.get('beta'):
         return None
     return ('BETA: the bridge runs on the HeadRush %s (tested by users), and MX-Edit supports it as a beta '
@@ -328,12 +328,12 @@ def beta_note(model):
 
 
 def updater_name(model, target='win'):
-    """Dateiname des geladenen Original-Updaters neben Skript/EXE."""
+    """Downloaded stock updater filename next to the script/executable."""
     return 'HeadRush_%s_2.7_Updater%s.zip' % (model['device'], '_Mac' if target == 'mac' else '')
 
 
 def official(model, target, work):
-    """Offiziellen Updater (geladen bzw. schon da) entpacken: (Ordner mit Update.img, .app oder None)."""
+    """Extract the downloaded/cached official updater: (Update.img folder, .app or None)."""
     src = os.path.join(BASE, updater_name(model, target))
     if os.path.exists(src):
         say('Using the already downloaded %s' % os.path.basename(src))
@@ -343,8 +343,8 @@ def official(model, target, work):
 
 
 def sign_app(app):
-    """Ad-hoc signieren (wie die NAM-Mod): das neue Update.img macht die Signatur von inMusic
-    ungueltig, und macOS startet eine .app mit kaputter Signatur nicht. Geht nur unter macOS."""
+    """Ad-hoc sign as the NAM mod does: changing Update.img invalidates inMusic's
+    signature, and macOS refuses an .app with a broken signature. macOS only."""
     if sys.platform != 'darwin' or not shutil.which('codesign'):
         say('Note: the app can only be re-signed on macOS. On the Mac run once:\n'
             '  codesign --force --deep --sign - "%s"' % os.path.basename(app))
@@ -358,7 +358,7 @@ def sign_app(app):
 
 
 def read_text(path):
-    """Config.json lesen: Windows-Updater UTF-8, Mac-Updater cp1252."""
+    """Read Config.json: Windows updater uses UTF-8, Mac updater uses cp1252."""
     raw = open(path, 'rb').read()
     try:
         return raw.decode('utf-8-sig')
@@ -367,26 +367,26 @@ def read_text(path):
 
 
 def app_name(device, nam):
-    """Name des gebauten Mac-Updaters."""
+    """Built Mac updater name."""
     return '%s %s%s Firmware Updater%s.app' % (bridgepatch.label(device), bridgepatch.VERSION,
                                                '' if device == 'MX5' else ' ' + device, ' + NAM' if nam else '')
 
 
-LAST_APP = [None]     # .app des letzten Baus mit Ziel 'mac'
+LAST_APP = [None]     # .app from the most recent build targeting 'mac'
 
 
 def build(src=None, out=None, need_nam=False, out_parent=None, model=None, target=None):
-    """Updater bauen. src: Eingabe (None = offiziellen Updater laden bzw. den schon geladenen
-    nehmen), out: Ausgabeordner (None = neben Skript/EXE). need_nam: Eingabe muss die NAM-Mod
-    enthalten (GUI: Haken NAM + eigene Datei). out_parent: Ordner, in dem der Ausgabeordner
-    MX5Bridge_<v>[_<Geraet>][_NAM]_Updater angelegt wird (Standard neben Skript/EXE; beim MX5
-    ohne Geraetenamen wie bisher). model: 'mx5'/'pedalboard'/'gigboard' - fuer den Download
-    (Standard MX5) und als Pruefung einer eigenen Datei (None = aus der Datei erkennen).
-    target: 'win' (Ordner mit FirmwareUpdater.exe) oder 'mac' (darin eine signierte .app), Standard
-    TARGET. Fehlen der Eingabe die Updater-Dateien des Ziels (z. B. Update_nam.img der NAM-Mod unter
-    Linux), kommen sie aus dem offiziellen Updater (Download).
-    Liefert (Ausgabeordner, nam, fehlende Dateien, Modell); Fehler als Fail/PatchError/Ext4Error.
-    Beim Ziel 'mac' steht der Pfad der .app danach in LAST_APP."""
+    """Build an updater. src: input (None downloads/reuses the official updater).
+    out: output folder (None uses the script/executable folder). need_nam: require
+    NAM in the input (GUI: NAM checkbox and custom file). out_parent: parent for
+    MX5Bridge_<v>[_<device>][_NAM]_Updater (default: next to script/executable;
+    omit device name for MX5 as before). model: 'mx5'/'pedalboard'/'gigboard'
+    selects download (default MX5) and validates custom input (None autodetects).
+    target: 'win' (FirmwareUpdater.exe folder) or 'mac' (signed .app inside),
+    default TARGET. Missing target updater files (e.g. Linux NAM Update_nam.img)
+    are downloaded from the official updater.
+    Return (output folder, nam, missing files, model); failures raise
+    Fail/PatchError/Ext4Error. For target 'mac', LAST_APP receives the .app path."""
     target = target or TARGET
     LAST_APP[0] = None
     want = bridgepatch.model(model) if model else None
@@ -421,7 +421,7 @@ def build(src=None, out=None, need_nam=False, out_parent=None, model=None, targe
         if note:
             say('\n' + note + '\n')
         nam_info = None
-        info = os.path.abspath(src) + '.nam.txt'     # Herkunft von tools/nam-mod.sh
+        info = os.path.abspath(src) + '.nam.txt'     # Source information from tools/nam-mod.sh
         if os.path.exists(info):
             nam_info = open(info, encoding='ascii').read()
         new, nam = patch(raw, nam_info, need_nam, found['device'])
@@ -431,7 +431,7 @@ def build(src=None, out=None, need_nam=False, out_parent=None, model=None, targe
                                                                             '_NAM' if nam else ''))
         os.makedirs(out, exist_ok=True)
         if target == 'mac':
-            if not app:   # Eingabe ohne Mac-Updater (Update.img, Windows-Updater): den offiziellen nehmen
+            if not app:   # Input lacks a Mac updater (Update.img or Windows updater): use the official one
                 folder, app = official(found, 'mac', work)
             dest = os.path.join(out, app_name(found['device'], nam))
             if os.path.exists(dest):
@@ -451,7 +451,7 @@ def build(src=None, out=None, need_nam=False, out_parent=None, model=None, targe
         orig = os.path.join(folder, 'Config.json')
         orig = read_text(orig) if os.path.exists(orig) else None
         if not all(os.path.exists(os.path.join(folder, n)) for n in UPDATER_FILES):
-            try:   # z. B. Update.img oder Mac-Updater als Eingabe: Windows-Dateien aus dem offiziellen Updater
+            try:   # E.g. Update.img or Mac updater input: obtain Windows files from the official updater
                 folder, _ = official(found, 'win', work)
                 orig = read_text(os.path.join(folder, 'Config.json'))
             except (Fail, OSError) as e:
@@ -498,7 +498,7 @@ def main():
 
 if __name__ == '__main__':
     rc = main()
-    if FROZEN and sys.stdin and sys.stdin.isatty():   # Doppelklick: Fenster nicht sofort schliessen
+    if FROZEN and sys.stdin and sys.stdin.isatty():   # Double-click launch: do not close the window immediately
         try:
             input('\nPress Enter to close this window.')
         except EOFError:

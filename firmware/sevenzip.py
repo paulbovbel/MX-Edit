@@ -1,11 +1,11 @@
-"""Minimaler 7z-Entpacker in reinem Python (Standardbibliothek).
+"""Minimal pure-Python 7z extractor (standard library).
 
-Grund: das tar.exe von Windows 10 und aelteren Windows-11-Builds (libarchive 3.5) ist ohne liblzma
-gebaut und kann den HeadRush-Updater (LZMA2 + BCJ2) nicht entpacken. Unterstuetzt: Copy, LZMA,
-LZMA2, BCJ2 (selbst dekodiert), BCJ x86/ARM/ARMT/PPC/SPARC/IA64 und Delta (ueber liblzma),
-gepackte Koepfe (kEncodedHeader), CRC-Pruefung. Nicht: AES, mehrteilige Archive.
+Windows 10/older Windows 11 tar.exe (libarchive 3.5) lacks liblzma and cannot
+extract the HeadRush updater (LZMA2 + BCJ2). Supports Copy, LZMA, LZMA2,
+BCJ2 (custom decoder), BCJ x86/ARM/ARMT/PPC/SPARC/IA64 and Delta via liblzma,
+encoded headers (kEncodedHeader), and CRC verification. No AES or split archives.
 
-    extract(archive_bytes, dest)  -> Liste der geschriebenen Dateinamen
+    extract(archive_bytes, dest) -> list of extracted filenames
 """
 import lzma
 import os
@@ -19,7 +19,7 @@ class Error(Exception):
     pass
 
 
-# ---- Lesen der Kopfstrukturen ----
+# ---- Read header structures ----
 class R:
     def __init__(self, d):
         self.d, self.p = d, 0
@@ -32,7 +32,7 @@ class R:
     def bytes(self, n):
         v = self.d[self.p:self.p + n]
         if len(v) != n:
-            raise Error('7z-Kopf zu kurz')
+            raise Error('7z header too short')
         self.p += n
         return v
 
@@ -70,8 +70,8 @@ class Folder:
     def __init__(self):
         self.coders = []          # (id, n_in, n_out, props)
         self.bind = []            # (in_index, out_index)
-        self.packed = []          # in-Indizes der gepackten Stroeme
-        self.sizes = []           # Groessen aller Ausgangsstroeme
+        self.packed = []          # Input indices of packed streams
+        self.sizes = []           # Sizes of all output streams
         self.crc = None
 
     def main_out(self):
@@ -88,7 +88,7 @@ def read_folder(r):
     for _ in range(r.num()):
         flag = r.byte()
         if flag & 0x80:
-            raise Error('7z: alternative Coder nicht unterstuetzt')
+            raise Error('7z: alternative coders are not supported')
         cid = r.bytes(flag & 0x0F)
         n_in, n_out = (r.num(), r.num()) if flag & 0x10 else (1, 1)
         props = r.bytes(r.num()) if flag & 0x20 else b''
@@ -106,7 +106,7 @@ def read_folder(r):
 
 
 def read_streams(r):
-    """StreamsInfo -> (pack_pos, pack_sizes, folders, substreams[(groesse, crc)] je Ordner)"""
+    """StreamsInfo -> (pack_pos, pack_sizes, folders, substreams[(size, crc)] per folder)"""
     pack_pos, pack_sizes, folders, subs = 0, [], [], None
     while True:
         t = r.num()
@@ -124,16 +124,16 @@ def read_streams(r):
                 elif u == 10:
                     r.digests(n)
                 else:
-                    raise Error('7z: unbekannte PackInfo-Eigenschaft %d' % u)
+                    raise Error('7z: unknown PackInfo property %d' % u)
         elif t == 7:                                  # UnpackInfo
             if r.num() != 11:
-                raise Error('7z: Folder erwartet')
+                raise Error('7z: expected Folder')
             n = r.num()
             if r.byte():
-                raise Error('7z: externe Folder nicht unterstuetzt')
+                raise Error('7z: external folders are not supported')
             folders = [read_folder(r) for _ in range(n)]
             if r.num() != 12:
-                raise Error('7z: CodersUnpackSize erwartet')
+                raise Error('7z: expected CodersUnpackSize')
             for f in folders:
                 f.sizes = [r.num() for _ in range(sum(c[2] for c in f.coders))]
             while True:
@@ -144,7 +144,7 @@ def read_streams(r):
                     for f, c in zip(folders, r.digests(len(folders))):
                         f.crc = c
                 else:
-                    raise Error('7z: unbekannte UnpackInfo-Eigenschaft %d' % u)
+                    raise Error('7z: unknown UnpackInfo property %d' % u)
         elif t == 8:                                  # SubStreamsInfo
             counts = [1] * len(folders)
             sizes = None
@@ -174,22 +174,22 @@ def read_streams(r):
                     for (fi, k), d in zip(need, r.digests(len(need))):
                         crcs[fi][k] = d
                 else:
-                    raise Error('7z: unbekannte SubStreams-Eigenschaft %d' % u)
+                    raise Error('7z: unknown SubStreams property %d' % u)
                 u = r.num()
             subs = [list(zip(s, c)) for s, c in zip(sizes, crcs)]
         else:
-            raise Error('7z: unbekannte StreamsInfo-Eigenschaft %d' % t)
+            raise Error('7z: unknown StreamsInfo property %d' % t)
     if subs is None:
         subs = [[(f.size(), f.crc)] for f in folders]
     return pack_pos, pack_sizes, folders, subs
 
 
-# ---- Dekodieren ----
+# ---- Decoding ----
 def _lzma_raw(data, filt, size):
     d = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[filt])
     out = d.decompress(data, size)
     if len(out) < size:
-        raise Error('7z: Daten unvollstaendig (%d von %d Bytes)' % (len(out), size))
+        raise Error('7z: incomplete data (%d of %d bytes)' % (len(out), size))
     return out
 
 
@@ -208,8 +208,8 @@ def _lzma2(data, props, size):
 
 
 def _filter(data, filt):
-    """Einzelnen liblzma-Filter (BCJ/Delta) dekodieren: Daten unveraendert LZMA2-verpacken und mit
-    der Kette Filter+LZMA2 entpacken - liblzma kennt keine Kette ohne LZMA am Ende."""
+    """Decode a single liblzma filter (BCJ/Delta): wrap unchanged data in LZMA2 and
+    decode with Filter+LZMA2; liblzma requires LZMA at the end of a filter chain."""
     lz = {'id': lzma.FILTER_LZMA2, 'preset': 0}
     packed = lzma.compress(data, lzma.FORMAT_RAW, filters=[lz])
     return lzma.decompress(packed, lzma.FORMAT_RAW, filters=[filt, lz])
@@ -228,8 +228,8 @@ def bcj2(main, call, jump, rc, size):
     ip, ci, ji = 0, 0, 0
     n = len(main)
     while len(out) < size and ip < n:
-        # bis einschliesslich zum naechsten Sprungbefehl kopieren (vorheriges Byte = letztes der
-        # Ausgabe, auch nach einer eingesetzten Adresse)
+        # Copy through the next jump instruction (previous byte is the last output byte,
+        # including after an inserted address)
         b = main[ip]
         prev = out[-1] if out else 0
         if (b & 0xFE) == 0xE8 or (prev == 0x0F and (b & 0xF0) == 0x80):
@@ -298,12 +298,12 @@ def run_coder(cid, props, ins, size):
     if cid == b'\x03':
         return _filter(ins[0], {'id': lzma.FILTER_DELTA, 'dist': props[0] + 1})[:size]
     if cid.startswith(b'\x06\xf1\x07'):
-        raise Error('7z: verschluesseltes Archiv')
-    raise Error('7z: Methode %s nicht unterstuetzt' % cid.hex())
+        raise Error('7z: encrypted archive')
+    raise Error('7z: method %s is not supported' % cid.hex())
 
 
 def decode_folder(f, packs):
-    """packs = gepackte Stroeme in der Reihenfolge f.packed"""
+    """packs: packed streams in f.packed order"""
     in_owner, out_owner = [], []
     for ci, c in enumerate(f.coders):
         in_owner += [ci] * c[1]
@@ -313,7 +313,7 @@ def decode_folder(f, packs):
         ci = out_owner[o]
         cid, n_in, n_out, props = f.coders[ci]
         if n_out != 1:
-            raise Error('7z: Coder mit mehreren Ausgaengen nicht unterstuetzt')
+            raise Error('7z: coders with multiple outputs are not supported')
         first = in_owner.index(ci)
         ins = []
         for i in range(first, first + n_in):
@@ -323,7 +323,7 @@ def decode_folder(f, packs):
 
     data = out_stream(f.main_out())
     if f.crc is not None and zlib.crc32(data) != f.crc:
-        raise Error('7z: CRC-Fehler')
+        raise Error('7z: CRC error')
     return data
 
 
@@ -341,21 +341,21 @@ def _folder_data(arc, pack_pos, pack_sizes, folders):
 
 def read_header(arc):
     if arc[:6] != SIG:
-        raise Error('keine 7z-Signatur')
+        raise Error('missing 7z signature')
     if zlib.crc32(arc[12:32]) != int.from_bytes(arc[8:12], 'little'):
-        raise Error('7z: Startkopf beschaedigt')
+        raise Error('7z: corrupt start header')
     off = int.from_bytes(arc[12:20], 'little')
     size = int.from_bytes(arc[20:28], 'little')
     hdr = arc[32 + off:32 + off + size]
     if len(hdr) != size or zlib.crc32(hdr) != int.from_bytes(arc[28:32], 'little'):
-        raise Error('7z: Archiv unvollstaendig oder beschaedigt')
+        raise Error('7z: incomplete or corrupt archive')
     while True:
         r = R(hdr)
         t = r.num()
         if t == 1:
             return r
         if t != 0x17:
-            raise Error('7z: unbekannter Kopftyp %d' % t)
+            raise Error('7z: unknown header type %d' % t)
         pack_pos, pack_sizes, folders, _ = read_streams(r)
         f, packs = next(_folder_data(arc, pack_pos, pack_sizes, folders))
         hdr = decode_folder(f, packs)
@@ -373,7 +373,7 @@ def extract(arc, dest):
             while r.num():
                 r.bytes(r.num())
         elif t == 3:
-            raise Error('7z: AdditionalStreams nicht unterstuetzt')
+            raise Error('7z: AdditionalStreams are not supported')
         elif t == 4:
             streams = read_streams(r)
         elif t == 5:                                  # FilesInfo
@@ -391,12 +391,12 @@ def extract(arc, dest):
                     empty_file = r.bits(sum(empty))
                 elif u == 0x11:
                     if r.byte():
-                        raise Error('7z: externe Namen nicht unterstuetzt')
+                        raise Error('7z: external names are not supported')
                     raw = r.d[r.p:end].decode('utf-16-le')
                     names = raw.split('\0')[:n]
                 r.p = end
         else:
-            raise Error('7z: unbekannte Header-Eigenschaft %d' % t)
+            raise Error('7z: unknown header property %d' % t)
     pack_pos, pack_sizes, folders, subs = streams
     files = [(sz, crc) for s in subs for sz, crc in s]
     written = []
@@ -409,7 +409,7 @@ def extract(arc, dest):
     for idx, name in enumerate(names):
         path = os.path.join(dest, *name.replace('\\', '/').split('/'))
         if '..' in name.replace('\\', '/').split('/') or os.path.isabs(name):
-            raise Error('7z: unsicherer Pfad %s' % name)
+            raise Error('7z: unsafe path %s' % name)
         if empty[idx]:
             is_file = ei < len(empty_file) and empty_file[ei]
             ei += 1
@@ -421,7 +421,7 @@ def extract(arc, dest):
             continue
         while cur_pos >= len(cur):
             if qi >= len(queue):
-                raise Error('7z: mehr Dateien als Daten')
+                raise Error('7z: more files than data')
             f, packs = next(datas)
             cur, cur_pos = decode_folder(f, packs), 0
             qi += 1
@@ -429,7 +429,7 @@ def extract(arc, dest):
         data = cur[cur_pos:cur_pos + sz]
         cur_pos += sz
         if crc is not None and zlib.crc32(data) != crc:
-            raise Error('7z: CRC-Fehler in %s' % name)
+            raise Error('7z: CRC error in %s' % name)
         os.makedirs(os.path.dirname(path) or dest, exist_ok=True)
         with open(path, 'wb') as out:
             out.write(data)
