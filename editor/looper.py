@@ -1,21 +1,19 @@
-"""looper.py - "Looper" als Ebene ueber dem Editor (ui.Overlay, wie der Tuner): zeigt die
-Looper-Ansicht am MX5 und bedient den Looper des Geraets - Aufnahme/Overdub, Start/Stop, Peel
-(letzte Ebene entfernen), Loeschen, Rueckwaerts, halbe/doppelte Geschwindigkeit und Laenge,
-Loop-Pegel, Feedback, Position vor/nach der Kette und die Belegung der Fussschalter (Main/Alt).
+"""looper.py: Looper overlay (ui.Overlay, like the tuner). Shows the MX5 looper
+and controls record/overdub, start/stop, peel (remove last layer), clear, reverse,
+half/double speed and length, loop level, feedback, pre/post position and Main/Alt
+footswitch layout.
 
-Das Fenster fragt den Zustand ab (~25x pro Sekunde, waehrend einer Aufnahme ~45x); der Editor
-setzt seine normale Abfrage so lange aus. Die Position im Loop liefert das Geraet nur in
-1-%-Schritten alle ~35 ms - Ring und Abspielkopf laufen deshalb mit ~60 Bildern/s ueber eine
-eigene Phase (Phase), die aus Loop-Laenge und Geraetewerten nachgefuehrt wird. Ring und
-Huellkurven werden mit Pillow geglaettet gerendert.
+Polls ~25 times/s, ~45 while recording; normal editor polling pauses. Device
+position updates in 1% steps every ~35 ms, so ring/playhead animate at ~60 fps
+using a Phase estimate corrected from loop length and device readings.
+Pillow renders antialiased rings/envelopes.
 
-Ebenen: Der Loop selbst liegt nur im Speicher der Geraete-App, darum zeichnet das Fenster je
-Ebene die Huellkurve des Eingangspegels, den es waehrend der Aufnahme mitliest (Layers). Ebenen,
-die vor dem Oeffnen des Fensters entstanden sind, erscheinen als Zeile ohne Pegeldaten.
+The loop exists only in device app memory. Layers records each layer's input-level
+envelope while recording. Layers created before opening have no level data.
 
-Schliessen (x, Escape, "Close looper") verlaesst die Looper-Ansicht am Geraet wieder, der Loop
-laeuft dabei weiter; verlaesst das Geraet die Ansicht selbst, schliesst sich die Ebene.
-Tasten: Leertaste Start/Stop, R Aufnahme/Overdub, U Peel.
+Closing (x, Escape, Close looper) leaves device looper view but playback continues.
+Device-side view exit closes the overlay. Keys: Space start/stop, R record/overdub,
+U peel.
 """
 import ctypes, sys, time, tkinter as tk
 
@@ -26,31 +24,31 @@ from ui import FONT_SMALL, FONT_BOLD, FONT_HEAD, FONT_CARD
 
 try:
     from PIL import Image, ImageDraw, ImageTk
-except ImportError:      # mx5editor.py prueft Pillow beim Start
+except ImportError:      # mx5editor.py checks Pillow at startup
     Image = None
 
-TICK_MS = 25            # Pause zwischen zwei Abfragen
-REC_TICK_MS = 8         # ... waehrend einer Aufnahme (mehr Pegelwerte fuer die Huellkurve)
-FRAME_MS = 16           # Animation von Ring und Abspielkopf (~60 Bilder/s)
-SLOW_MS = 500           # Pause nach einem Fehler
-GRACE = 1.0             # s: eigene Einstellung nicht von der Abfrage ueberschreiben lassen
+TICK_MS = 25            # Delay between polls
+REC_TICK_MS = 8         # While recording: more level samples for the envelope
+FRAME_MS = 16           # Ring/playhead animation (~60 fps)
+SLOW_MS = 500           # Delay after an error
+GRACE = 1.0             # Seconds: protect local setting writes from stale poll updates
 AMBER = "#f2b33d"
 HINT = "The looper runs on the device. Keys: Space start/stop · R record/overdub · U peel."
 STATE_COLOUR = {"RECORD": DANGER, "OVERDUB": DANGER, "PLAY": ACCENT, "READY": AMBER}
 LAYER_COLOURS = [ACCENT, "#4aa8ff", "#b77cff", "#f2b33d", "#ff7aa8", "#7fd36b", "#4fd8e6", "#ff9a52"]
 
-BINS = 400              # Aufloesung einer Ebenen-Huellkurve ueber eine Loop-Laenge
-FLOOR_DB = -60.0        # darunter gilt der Pegel als still
-SS = 3                  # Ueberabtastung beim Rendern
-LANES_ROWS = 4          # feste Hoehe der Ebenen-Flaeche in Zeilen (der Dialog springt so nicht)
-ROW_H, ROW_GAP, ROW_MIN = 34, 4, 10   # Zeilenhoehe, Abstand, kleinste Hoehe bei vielen Ebenen (px)
-EASE = 0.28             # Anteil des Wegs je Bild beim Gleiten/Auf- und Zuklappen der Zeilen
-REC_RENDER_S = 0.06     # eine wachsende Aufnahme-Zeile hoechstens so oft neu rendern
-LANE_FONT_SMALL = (U.SANS, 8)   # Beschriftung flacher Zeilen (nicht fett, damit nichts springt)
+BINS = 400              # Envelope resolution per loop length
+FLOOR_DB = -60.0        # Levels below this count as silence
+SS = 3                  # Rendering supersampling
+LANES_ROWS = 4          # Fixed layer area height in rows, avoiding dialog jumps
+ROW_H, ROW_GAP, ROW_MIN = 34, 4, 10   # Row height, spacing and minimum height for many layers (px)
+EASE = 0.28             # Fraction of distance per animation frame when sliding/expanding/collapsing rows
+REC_RENDER_S = 0.06     # Maximum refresh rate for a growing recording row
+LANE_FONT_SMALL = (U.SANS, 8)   # Flat-row labels, not bold to avoid size jumps
 
 
 def _mult(text):
-    """MultText "x 2" -> 2.0 (Laengenfaktor des Loops)."""
+    """MultText 'x 2' -> 2.0 (loop length multiplier)."""
     t = (text or "x 1").replace("x", "").strip()
     try:
         if "/" in t:
@@ -62,8 +60,8 @@ def _mult(text):
 
 
 def _timer_resolution(on):
-    """Windows-Zeitgeber auf 1 ms stellen, solange das Fenster offen ist (sonst landet after()
-    auf 15,6-ms-Schritten und die Animation laeuft mit ~32 statt ~60 Bildern/s)."""
+    """Set Windows timer resolution to 1 ms while open. Otherwise after() uses
+    15.6 ms steps and animation runs at ~32 rather than ~60 fps."""
     if sys.platform == "win32":
         try:
             (ctypes.windll.winmm.timeBeginPeriod if on else ctypes.windll.winmm.timeEndPeriod)(1)
@@ -76,17 +74,17 @@ def _rgb(c):
     return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
 
 
-# ---------------- Phase: fluessige Position zwischen den Abfragen ----------------
+# ---------------- Phase: smooth position between polls ----------------
 class Phase:
-    """Schaetzt die Position im Loop (0..100) fuer jeden Zeitpunkt. Nennrate = 100 % / Loop-Laenge
-    (LengthText beruecksichtigt Geschwindigkeit und Laenge); jede Geraeteablesung zieht die Phase
-    sanft nach (wie eine PLL), grosse Abweichungen (Sprung, Neustart) werden direkt uebernommen."""
+    """Estimate loop position 0..100 at any time. Nominal rate is 100%/loop length
+    (LengthText includes speed/length). Gently correct phase from device readings,
+    like a PLL; apply large differences (jumps/restarts) immediately."""
 
-    LAG = 0.5           # %: Geraetewert ist abgeschnitten (1-%-Schritte) -> im Mittel +0,5
-    DELAY = 0.020       # s: Alter einer Ablesung bei ihrer Ankunft (Abfrage + Aktualisierungstakt)
+    LAG = 0.5           # Percent: device readings truncate to 1% steps, averaging +0.5 correction
+    DELAY = 0.020       # Seconds: reading age on arrival (query time plus update interval)
 
     def __init__(self):
-        self.anchor = None      # Position zur Zeit t0
+        self.anchor = None      # Position at t0
         self.t0 = 0.0
         self.rate = 0.0         # %/s
         self.nominal = 0.0
@@ -98,7 +96,7 @@ class Phase:
             self.anchor, self.t0, self.rate = pos, t, 0.0
             return
         nominal = 100.0 / max(0.05, seconds)
-        if abs(nominal - self.nominal) > 1e-6 * nominal:   # Laenge/Geschwindigkeit geaendert
+        if abs(nominal - self.nominal) > 1e-6 * nominal:   # Length/speed changed
             self.nominal, self.rate = nominal, nominal
         measured = pos + self.LAG + self.rate * self.DELAY
         if self.anchor is None:
@@ -110,7 +108,7 @@ class Phase:
             self.anchor, self.t0 = measured % 100.0, t
             return
         self.anchor, self.t0 = (pred + 0.12 * err) % 100.0, t
-        # Rate leicht nachfuehren (LengthText hat nur 0,1 s Aufloesung), hoechstens +-10 %
+        # Adjust rate gently (LengthText resolution is 0.1 s), at most +/-10%
         self.rate = max(0.9 * self.nominal, min(1.1 * self.nominal, self.rate * (1.0 + 0.004 * err)))
 
     def at(self, t):
@@ -121,27 +119,25 @@ class Phase:
         return (self.anchor + self.rate * (t - self.t0)) % 100.0
 
 
-# ---------------- Layers: Pegel-Huellkurven der Ebenen ----------------
+# ---------------- Layers: recorded level envelopes ----------------
 class Layers:
-    """Ebenenliste wie am Geraet (verifiziert 2026-10-11): die erste Aufnahme ist Ebene 1, ein
-    Overdub ergibt je vollem Durchlauf eine Ebene - NumLayers springt genau eine Loop-Laenge nach
-    dem Einstiegspunkt um. Ein angefangener, nicht vollendeter Durchlauf (Rest am Ende, kurzes
-    Overdub) ist keine eigene Ebene, er gehoert zur letzten (Peel braucht so viele Schritte, wie
-    NumLayers zeigt). items = gezeigte Zeilen {kind: base|dub|unknown, bins: [dB oder None] * BINS
-    ueber eine Loop-Laenge, mult: Laengenfaktor bei der Aufnahme}; waehrend eines Overdubs ist die
-    letzte Zeile der laufende, noch ungezaehlte Durchlauf (Index dub).
-    Die erste Aufnahme wird nach Zeit gesammelt (ihre Laenge steht erst beim Schliessen fest),
-    Overdubs nach Position im Loop."""
+    """Device-style layers (verified 2026-10-11): first recording is layer 1;
+    each complete overdub pass adds a layer, NumLayers changes exactly one loop
+    length after entry. An incomplete pass belongs to the last layer (Peel steps
+    match NumLayers). items holds displayed rows {kind: base|dub|unknown,
+    bins: [dB or None] * BINS per loop, mult: length multiplier at recording}.
+    During overdub the last row is the current uncounted pass (index dub).
+    Collect first recording by time (length known only at close), overdubs by position."""
 
     def __init__(self):
         self.items = []
-        self.base = None          # (t0, [(t, dB)]) waehrend der ersten Aufnahme
-        self.dub = None           # Index der Zeile des laufenden Durchlaufs (Overdub)
-        self.last_frac = None     # letzte Position (0..1) der laufenden Zeile
-        self.dev_layers = 0       # NumLayers des Geraets bei der letzten Ablesung
-        self.synced = False       # erster Abgleich erledigt (fehlende Ebenen davor = vor dem Fenster)
-        self.version = 0          # zaehlt jede Aenderung (fuer das Neuzeichnen)
-        self._keys = getattr(self, "_keys", 0)   # laufende Zeilennummer (bleibt ueber Clear hinweg eindeutig)
+        self.base = None          # (t0, [(t, dB)]) during first recording
+        self.dub = None           # Row index of the current overdub pass
+        self.last_frac = None     # Last position (0..1) of the current row
+        self.dev_layers = 0       # Device NumLayers at last reading
+        self.synced = False       # First sync complete; earlier missing layers predate this window
+        self.version = 0          # Counts every change for redraw
+        self._keys = getattr(self, "_keys", 0)   # Monotonic row number, unique even across Clear
 
     def _key(self):
         self._keys += 1
@@ -151,7 +147,7 @@ class Layers:
         return len(self.items) - (1 if self.dub is not None else 0)
 
     def feed(self, info, t, frac):
-        """Eine Ablesung verarbeiten. frac = Position im Loop (0..1, aus der Phase)."""
+        """Process a reading. frac is loop position 0..1 from Phase."""
         start, rec = info.get("start"), info.get("rec")
         level, mult = info.get("level"), _mult(info.get("mult"))
         n = info.get("layers") or 0
@@ -162,7 +158,7 @@ class Layers:
             self.synced = True
             self.dev_layers = 0
             return
-        if start == "Empty" and rec == "Rec":            # erste Aufnahme laeuft
+        if start == "Empty" and rec == "Rec":            # First recording in progress
             if self.base is None:
                 self.items, self.dub = [], None
                 self.base = (t, [], self._key())
@@ -171,22 +167,22 @@ class Layers:
             self.dev_layers = n
             self.synced = True
             return
-        if self.base is not None:                        # Loop eben geschlossen
+        if self.base is not None:                        # Loop just closed
             self.items = [self._finish_base(t)]
             self.base = None
             self.version += 1
         recording = rec == "Rec"
         if self.dub is not None and n > self.dev_layers and self.dev_layers:
-            # Geraet hat den laufenden Durchlauf als Ebene gezaehlt -> Zeile abschliessen
+            # Device counted the current pass as a layer: finish the row
             for _ in range(n - self.dev_layers):
                 self.dub = None
-                if recording:                            # naechster Durchlauf beginnt hier
+                if recording:                            # Next pass starts here
                     self._new_row(mult, frac)
             self.version += 1
         if not recording and self.dub is not None:
-            # Ausgestiegen: der angefangene Durchlauf gehoert zur letzten Ebene (das Geraet zaehlt nur
-            # waehrend der Aufnahme, nie beim Aussteigen - gemessen an fuenf Einstiegen). Sofort
-            # uebernehmen: ein schnelles Wieder-Einsteigen beginnt einen neuen Durchlauf.
+            # On exit, the partial pass belongs to the last layer. The device counts
+            # only while recording, never on exit (measured over five entries). Apply
+            # immediately: quickly reentering starts a new pass.
             rest = self.items.pop(self.dub)
             self.dub = None
             if self.items and self.items[-1].get("bins") and any(b is not None for b in rest["bins"]):
@@ -197,7 +193,7 @@ class Layers:
                     prev["rev"] = prev.get("rev", 0) + 1
             self.version += 1
         if recording:
-            if self.dub is None:                         # eingestiegen: neuer Durchlauf
+            if self.dub is None:                         # Entered recording: new pass
                 self._new_row(mult, None)
             self._paint(self.items[self.dub], frac, level)
             self.version += 1
@@ -208,7 +204,7 @@ class Layers:
     def _new_row(self, mult, frac):
         self.items.append({"kind": "dub", "bins": [None] * BINS, "mult": mult, "key": self._key(), "rev": 0})
         self.dub = len(self.items) - 1
-        self.last_frac = frac      # None = erst ab der naechsten Ablesung malen
+        self.last_frac = frac      # None: start drawing at the next reading
 
     def _finish_base(self, t):
         t0, samples, _ = self.base
@@ -218,18 +214,18 @@ class Layers:
             i = min(BINS - 1, int(ts / total * BINS))
             if db is not None:
                 bins[i] = db if bins[i] is None else max(bins[i], db)
-        # gleicher Schluessel wie die Aufnahme-Zeile, damit die Anzeige sie nahtlos weiterfuehrt
+        # Same key as recording row for a seamless display transition
         return {"kind": "base", "bins": _fill(bins), "mult": 1.0, "key": self.base[2], "rev": 0}
 
     def _paint(self, layer, frac, db):
-        """Pegel von der letzten bis zur aktuellen Position eintragen (vorwaerts, ueber das Ende hinweg)."""
+        """Fill levels from previous to current position, forward across wraparound."""
         if db is None:
             return
         bins = layer["bins"]
         i1 = int(frac * BINS) % BINS
         i0 = i1 if self.last_frac is None else int(self.last_frac * BINS) % BINS
         span = (i1 - i0) % BINS
-        if span > BINS // 3:    # Sprung (Neustart, Rueckspulen): nur die aktuelle Stelle
+        if span > BINS // 3:    # Jump (restart/rewind): current position only
             i0, span = i1, 0
         for k in range(span + 1):
             j = (i0 + k) % BINS
@@ -238,11 +234,11 @@ class Layers:
         self.last_frac = frac
 
     def sync(self, n):
-        """Ebenenzahl mit dem Geraet abgleichen (nur ohne laufenden Durchlauf). Peel senkt NumLayers
-        -> letzte Zeilen weg. Fehlen Zeilen, sind sie beim ersten Abgleich vor dem Fenster
-        entstanden (Zeilen ohne Pegel davor), spaeter verpasste Durchlaeufe (hinten)."""
+        """Match device layer count only without an active pass. Peel reduces NumLayers,
+        removing trailing rows. Missing rows on first sync predate the window (prepend
+        unknown rows); later missing rows are missed passes (append)."""
         changed = False
-        if n >= 1:                                       # 0 bei laufendem Loop: nicht ernst nehmen
+        if n >= 1:                                       # Ignore zero while a loop is running
             while len(self.items) > n:
                 self.items.pop()
                 changed = True
@@ -263,7 +259,7 @@ class Layers:
 
 
 def _fill(bins):
-    """Luecken (keine Ablesung in diesem Abschnitt) linear zwischen den Nachbarn fuellen."""
+    """Linearly interpolate gaps with no readings between neighboring bins."""
     idx = [i for i, v in enumerate(bins) if v is not None]
     if not idx:
         return bins
@@ -279,7 +275,7 @@ def _fill(bins):
 
 
 def _height(db):
-    """dB -> 0..1 (Hoehe der Huellkurve)."""
+    """dB -> 0..1 envelope height."""
     if db is None:
         return 0.0
     v = max(0.0, min(1.0, (db - FLOOR_DB) / -FLOOR_DB))
@@ -288,7 +284,7 @@ def _height(db):
 
 # ---------------- Rendering ----------------
 def ring_image(size, frac, colour, full=False):
-    """Fortschrittsring als geglaettetes Bild: Spur + Bogen von 12 Uhr im Uhrzeigersinn mit runden Enden."""
+    """Antialiased progress ring: track plus clockwise arc from noon with round caps."""
     S = size * SS
     im = Image.new("RGB", (S, S), _rgb(PANEL))
     dr = ImageDraw.Draw(im)
@@ -305,26 +301,26 @@ def ring_image(size, frac, colour, full=False):
         import math
         r = (S - 2 * m) / 2 - w / 2 + 0.5
         cx = cy = S / 2
-        for a in (-90, a1):    # runde Enden
+        for a in (-90, a1):    # Round caps
             x, y = cx + r * math.cos(math.radians(a)), cy + r * math.sin(math.radians(a))
             dr.ellipse([x - w / 2, y - w / 2, x + w / 2, y + w / 2], fill=col)
     return im.resize((size, size), Image.LANCZOS)
 
 
 def row_image(w, h, row, colour, mult_now):
-    """Eine Ebenen-Zeile als geglaettetes Bild: abgerundeter Hintergrund + gespiegelte Huellkurve.
-    row: Ebene aus Layers.items oder {"kind": "rec", "samples": [(t, dB)]} fuer die erste Aufnahme."""
+    """Antialiased layer row: rounded background and mirrored envelope.
+    row: Layers.items entry, or {kind: rec, samples: [(t,dB)]} for first recording."""
     W, H = max(1, w) * SS, max(1, h) * SS
     im = Image.new("RGB", (W, H), _rgb(PANEL))
     dr = ImageDraw.Draw(im)
     dr.rounded_rectangle([0, 0, W - 1, H - 1], radius=int(min(px(5), h / 2) * SS), fill=_rgb(CARD))
     mid, amp = H / 2, max(0.0, H / 2 - 3 * SS)
     if row["kind"] == "unknown":
-        for x in range(int(4 * SS), W - int(4 * SS), int(10 * SS)):   # gestrichelte Mittellinie
+        for x in range(int(4 * SS), W - int(4 * SS), int(10 * SS)):   # Dashed center line
             dr.line([x, mid, x + 5 * SS, mid], fill=_rgb(DIM), width=SS)
     else:
         vals = []
-        if row["kind"] == "rec":   # erste Aufnahme: Laenge offen, Kurve auf die bisherige Zeit gestreckt
+        if row["kind"] == "rec":   # First recording: unknown final length, stretch curve over elapsed time
             samples = row["samples"]
             t_end, k = max(0.25, samples[-1][0] if samples else 0.25), 0
             for x in range(0, W + 1, SS):
@@ -343,15 +339,15 @@ def row_image(w, h, row, colour, mult_now):
 
 
 class _Lane:
-    """Eine gezeigte Zeile: animierte Lage (y, h -> ty, th) und ihre Canvas-Elemente."""
+    """Displayed row: animated geometry (y,h -> ty,th) and Canvas items."""
 
     def __init__(self, ty):
         self.y, self.h, self.ty, self.th = ty, 0.0, ty, 0.0
         self.img = self.dot = self.txt = self.note = self.note_bg = None
-        self.src = None            # gerendertes Bild in Zielhoehe
-        self.sig = None            # (Inhalt, Farbe, Breite, Hoehe) des gerenderten Bilds
+        self.src = None            # Rendered image at target height
+        self.sig = None            # (content, color, width, height) of rendered image
         self.photo = None
-        self.shown_h = None        # Hoehe des gezeigten PhotoImage
+        self.shown_h = None        # Displayed PhotoImage height
         self.rendered_at = 0.0
         self.dot_colour = None
         self.dying = False
@@ -359,29 +355,29 @@ class _Lane:
 
 
 class LooperDialog(U.Overlay):
-    """first: erste Ablesung (live.looper_open). Der Editor haelt die Ebene in editor.looper_dialog
-    und wird ueber editor.looper_dialog_done(dlg, device_exited) vom Schliessen unterrichtet."""
+    """first: initial live.looper_open reading. Stored in editor.looper_dialog;
+    notify editor.looper_dialog_done(dlg, device_exited) on close."""
 
     def __init__(self, editor, first):
         super().__init__(editor, "Looper", width=720, click_out=True)
         self.ed = editor
-        self.pending = False        # Abfrage unterwegs
-        self.acting = 0             # Tastendruecke unterwegs (Anzeige erst danach wieder von der Abfrage)
+        self.pending = False        # Poll in flight
+        self.acting = 0             # Button presses in flight; resume poll-driven display afterwards
         self.closed = False
         self.info = first
         self.phase = Phase()
         self.layers = Layers()
         self._ring_key = None
-        self._written = {}          # Pfad -> Zeit des eigenen Schreibzugriffs
-        self._instant = time.time() + 0.6   # bis dahin: Zeilen sofort in voller Hoehe (Oeffnen)
+        self._written = {}          # Path -> time of local write
+        self._instant = time.time() + 0.6   # Until then, show rows immediately at full height on opening
         self.build()
         self.observe(first)
         self.show(first)
-        # erstes Bild schon jetzt (unter der Einblende), statt Ring und Ebenen sichtbar nachzuzeichnen
+        # Render first frame under the fade-in, avoiding visible ring/layer construction
         self.update_idletasks()
         self.draw_ring()
         self.draw_lanes()
-        # Tasten am ganzen Fenster (die Ebene hat nicht immer den Fokus), beim Schliessen wieder entfernt
+        # Bind keys across the window (overlay may not have focus); remove on close
         top = self.winfo_toplevel()
         self._keys = [(key, top.bind(key, lambda e, n=name: self.key(e, n), add="+"))
                       for key, name in (("<space>", "play"), ("r", "record"), ("R", "record"),
@@ -390,7 +386,7 @@ class LooperDialog(U.Overlay):
         self.after(TICK_MS, self.tick)
         self.after(FRAME_MS, self.frame)
 
-    # ---------------- Aufbau ----------------
+    # ---------------- Layout ----------------
     def build(self):
         b = self.body
         b.configure(padx=px(6))
@@ -412,15 +408,15 @@ class LooperDialog(U.Overlay):
         self.lbl_remain = tk.Label(info, text="", bg=PANEL, fg=DIM, font=FONT_SMALL, anchor="w")
         self.lbl_remain.pack(fill="x", pady=(px(4), 0))
 
-        # Ebenen
+        # Layers
         self.lanes = tk.Canvas(b, height=LANES_ROWS * (px(ROW_H) + px(ROW_GAP)) - px(ROW_GAP), width=px(200),
                                bg=PANEL, highlightthickness=0)
         self.lanes.pack(fill="x", pady=(px(14), 0))
-        self._lanes = {}           # Schluessel -> _Lane
+        self._lanes = {}           # Key -> _Lane
         self._head = None
         self._empty = None
 
-        # Bedienung wie die Fussschalter
+        # Controls matching the footswitches
         row = tk.Frame(b, bg=PANEL)
         row.pack(fill="x", pady=(px(14), 0))
         big = dict(padx=16, pady=9, font=FONT_BOLD, width=128)
@@ -433,7 +429,7 @@ class LooperDialog(U.Overlay):
         self.b_clear = U.Btn(row, "CLEAR", icon="trash", command=lambda: self.action("clear"), kind="danger", **big)
         self.b_clear.pack(side="left")
 
-        # Wiedergabe
+        # Playback
         row = tk.Frame(b, bg=PANEL)
         row.pack(fill="x", pady=(px(14), 0))
         self.lbl_speed = self._stepper(row, "Speed", "half_speed", "double_speed")
@@ -446,7 +442,7 @@ class LooperDialog(U.Overlay):
 
         tk.Frame(b, bg=LINE, height=1).pack(fill="x", pady=(px(14), px(10)))
 
-        # Einstellungen
+        # Settings
         grid = tk.Frame(b, bg=PANEL)
         grid.pack(fill="x")
         grid.columnconfigure(1, weight=1)
@@ -457,7 +453,7 @@ class LooperDialog(U.Overlay):
         self.seg_loc = U.Segmented(grid, ["Pre (before the chain)", "Post (after the chain)"],
                                    on_pick=lambda i: self.write(L.LOOPER_LOC, "index", i))
         self.seg_loc.grid(row=2, column=1, columnspan=2, sticky="w", pady=(px(8), 0))
-        self.seg_alt = None   # Main|Alt gibt es nur am MX5 (Pedalboard: eigene Looper-Schalter)
+        self.seg_alt = None   # Main|Alt exists only on MX5; Pedalboard has dedicated looper switches
         if L.DEV.alt_looper:
             tk.Label(grid, text="Footswitches", bg=PANEL, fg=MUTED, font=FONT_SMALL, anchor="w").grid(
                 row=3, column=0, sticky="w", pady=(px(8), 0))
@@ -499,11 +495,11 @@ class LooperDialog(U.Overlay):
         val.grid(row=r, column=2, sticky="e")
         return sl, val
 
-    # ---------------- Abfrage ----------------
+    # ---------------- Polling ----------------
     def tick(self):
         if self.closed or not self.winfo_exists():
             return
-        self.raise_()    # bleibt ueber allem, was der Editor inzwischen einblendet
+        self.raise_()    # Stay above anything the editor opens meanwhile
         s = self.ed.session
         if not s:
             self.close(quiet=True)
@@ -524,7 +520,7 @@ class LooperDialog(U.Overlay):
             self.after(SLOW_MS, self.tick)
             return
         if info.get("board") and info["board"] not in ("Looper", "Tuner", "FreeText"):
-            # Looper-Ansicht am Geraet verlassen -> Fenster schliessen (der Loop laeuft weiter)
+            # Device left looper view: close the window, keep loop playback
             self.close(device_exited=True)
             return
         self.observe(info)
@@ -535,13 +531,13 @@ class LooperDialog(U.Overlay):
         self.after(REC_TICK_MS if info.get("rec") == "Rec" else TICK_MS, self.tick)
 
     def observe(self, info):
-        """Phase und Ebenen mit einer Ablesung nachfuehren (auch Antworten auf Tastendruecke)."""
+        """Update phase/layers from a reading, including button responses."""
         t = time.time()
         playing = info.get("start") == "Playing"
         self.phase.update(t, info.get("pos") or 0.0, info.get("seconds"), playing)
         self.layers.feed(info, t, self.phase.at(t) / 100.0)
 
-    # ---------------- Anzeige ----------------
+    # ---------------- Display ----------------
     def show(self, info):
         self.info = info
         recording = info.get("rec") == "Rec"
@@ -592,14 +588,14 @@ class LooperDialog(U.Overlay):
                                   else "FS1 start/stop · FS2 record/overdub · FS3 Alt")
 
     def frame(self):
-        """Ein Animationsbild: Ring und Abspielkopf aus der Phase, Ebenenbild bei neuen Daten."""
+        """Animation frame: phase-driven ring/playhead; rerender layers when data changes."""
         if self.closed or not self.winfo_exists():
             return
         t = time.perf_counter()
         try:
             self.draw_ring()
             self.draw_lanes()
-        finally:   # Arbeitszeit abziehen, damit der Takt bei ~60 Bildern/s bleibt
+        finally:   # Subtract processing time to maintain ~60 fps
             self.after(max(1, FRAME_MS - int((time.perf_counter() - t) * 1000)), self.frame)
 
     def draw_ring(self):
@@ -609,7 +605,7 @@ class LooperDialog(U.Overlay):
         first_rec = info.get("start") == "Empty" and info.get("rec") == "Rec"
         has_loop = info.get("start") not in (None, "Empty")
         pos = self.phase.at(time.time()) if has_loop else 0.0
-        frac = round(pos / 100.0 * 720) / 720.0    # halbe Grad - darunter sieht man keinen Unterschied
+        frac = round(pos / 100.0 * 720) / 720.0    # Half-degree steps; smaller differences are invisible
         key = (frac if has_loop else -1, col, first_rec)
         if key != self._ring_key:
             self._ring_key = key
@@ -619,7 +615,7 @@ class LooperDialog(U.Overlay):
         c.itemconfigure(self.ring_pct, text=("%d %%" % int(pos)) if has_loop else "")
 
     def lane_rows(self):
-        """Gewuenschte Zeilen: [(Schluessel, Zeile, Farbe, Beschriftung, Inhaltsstand)]."""
+        """Desired rows: [(key, row, color, label, content_revision)]."""
         lay = self.layers
         out = []
         for r, it in enumerate(lay.items):
@@ -635,8 +631,8 @@ class LooperDialog(U.Overlay):
         return out
 
     def draw_lanes(self):
-        """Ein Bild der Ebenen-Flaeche: Zeilen gleiten in ihre Lage, neue wachsen auf, entfernte
-        schrumpfen weg; gerendert wird nur eine Zeile mit neuem Inhalt oder neuer Zielhoehe."""
+        """Layer-area frame: rows slide into place, new rows grow, removed rows shrink.
+        Rerender only rows with changed content or target height."""
         c = self.lanes
         w, H = c.winfo_width(), c.winfo_height()
         if w < 50 or Image is None:
@@ -650,7 +646,7 @@ class LooperDialog(U.Overlay):
         n = len(rows)
         row_h = min(px(ROW_H), max(px(ROW_MIN), (H - gap * (n - 1)) / max(1, n)))
         total = n * (row_h + gap) - gap
-        offset = min(0.0, H - total)          # zu viele Zeilen: die neuesten bleiben sichtbar
+        offset = min(0.0, H - total)          # Too many rows: keep the newest visible
         mult_now = _mult((self.info or {}).get("mult"))
         wanted = set()
         for i, (key, row, colour, label, rev) in enumerate(rows):
@@ -659,17 +655,17 @@ class LooperDialog(U.Overlay):
             ln = self._lanes.get(key)
             if ln is None:
                 ln = self._lanes[key] = _Lane(ty)
-                if instant:   # beim Oeffnen schon vorhandene Ebenen: gleich in voller Hoehe
+                if instant:   # Layers present on opening start at full height
                     ln.h = row_h
             ln.ty, ln.th, ln.dying = ty, row_h, False
             ln.row, ln.colour, ln.label, ln.rev = row, colour, label, rev
         for key, ln in self._lanes.items():
             if key not in wanted and not ln.dying:
                 ln.dying, ln.th = True, 0.0
-                for item in (ln.img, ln.dot, ln.txt, ln.note_bg, ln.note):   # unter die bleibenden Zeilen
+                for item in (ln.img, ln.dot, ln.txt, ln.note_bg, ln.note):   # Below the remaining rows
                     if item:
                         c.tag_lower(item)
-        budget = [99 if instant else 1]   # hoechstens eine Zeile je Bild neu rendern (sonst Ruckler bei vielen Zeilen)
+        budget = [99 if instant else 1]   # Rerender at most one row per frame to avoid stutter with many rows
         for key in list(self._lanes):
             ln = self._lanes[key]
             for a, t in (("y", "ty"), ("h", "th")):
@@ -682,7 +678,7 @@ class LooperDialog(U.Overlay):
                 del self._lanes[key]
                 continue
             self._place_lane(c, ln, label_w, lane_w, mult_now, now, budget)
-        # Hinweis ohne Ebenen
+        # Empty-layer hint
         if not self._lanes:
             if self._empty is None:
                 self._empty = (c.create_text(w / 2, H / 2 - px(8), text="Layers appear here while you record",
@@ -693,7 +689,7 @@ class LooperDialog(U.Overlay):
             for item in self._empty:
                 c.delete(item)
             self._empty = None
-        # Abspielkopf (jedes Bild, immer obenauf)
+        # Playhead: every frame, always on top
         if self._head is None:
             self._head = c.create_line(0, 0, 0, 0, fill=TEXT, width=max(1, int(px(2))))
         info = self.info or {}
@@ -706,7 +702,7 @@ class LooperDialog(U.Overlay):
             c.itemconfigure(self._head, state="hidden")
 
     def _place_lane(self, c, ln, label_w, lane_w, mult_now, now, budget):
-        """Bild, Punkt und Beschriftung einer Zeile an ihre aktuelle (animierte) Lage setzen."""
+        """Move a row's image, dot and label to its current animated position."""
         th = max(1, int(round(ln.th))) if not ln.dying else (ln.src.height if ln.src else 1)
         sig = (ln.rev, ln.colour, lane_w, th, mult_now if ln.row.get("kind") != "rec" else 0)
         if not ln.dying and sig != ln.sig:
@@ -714,7 +710,7 @@ class LooperDialog(U.Overlay):
                 go = True
             else:
                 content = sig[:3] != ln.sig[:3] or sig[4] != ln.sig[4]
-                settled = abs(ln.h - ln.th) < 0.5      # nur die Hoehe neu: erst nach der Animation scharf rendern
+                settled = abs(ln.h - ln.th) < 0.5      # Only height changed: render sharply after the animation
                 go = budget[0] > 0 and ((content and (ln.colour != DANGER or now - ln.rendered_at > REC_RENDER_S))
                                         or (not content and settled))
             if go:
@@ -735,7 +731,7 @@ class LooperDialog(U.Overlay):
                 else:
                     c.itemconfigure(ln.img, image=ln.photo, state="normal")
             c.coords(ln.img, label_w, y)
-        # Punkt + Beschriftung (blenden mit der Hoehe ein und aus)
+        # Dot and label fade with row height
         cy = y + ln.h / 2
         k = min(1.0, ln.h / max(1.0, px(ROW_MIN)))
         if ln.dot is None or ln.dot_colour != ln.colour:
@@ -769,7 +765,7 @@ class LooperDialog(U.Overlay):
             c.tag_raise(ln.note_bg)
             c.tag_raise(ln.note)
 
-    # ---------------- Bedienung ----------------
+    # ---------------- Controls ----------------
     def action(self, name):
         s = self.ed.session
         if not s or self.closed:
@@ -809,7 +805,7 @@ class LooperDialog(U.Overlay):
         self.close()
 
     def close(self, device_exited=False, quiet=False):
-        """quiet: nur das Fenster schliessen (der Editor kuemmert sich selbst um das Geraet)."""
+        """quiet: close only the window; the editor handles the device itself."""
         if self.closed:
             return
         self.closed = True

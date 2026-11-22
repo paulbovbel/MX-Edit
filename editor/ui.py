@@ -1,48 +1,47 @@
-"""ui.py - Dunkles Erscheinungsbild nach dem Vorbild des HeadRush-Web-Editors.
+"""ui.py: dark styling inspired by the HeadRush web editor.
 
-Farben, Schriften und die eigenen Widgets (Knoepfe, Regler, Kippschalter,
-Auswahlfelder, Rig-Liste, Signalkette, Modell-Auswahl, Dialoge).
+Colors, fonts and custom buttons, sliders, toggles, selectors, rig list,
+signal chain, model picker and dialogs.
 
-Technik: das Programm meldet sich bei Windows als DPI-bewusst an (sonst wird
-das Fenster bei 125 % Skalierung unscharf hochgerechnet); Pixelmasse laufen
-durch px(). tkinter kann keine geglaetteten Rundungen zeichnen, darum werden
-abgerundete Flaechen, Kreise und Symbole mit Pillow 4-fach ueberabgetastet
-gerendert und als Bilder auf Canvas-Flaechen gelegt (Cache in _IMAGES).
+Windows DPI awareness prevents blurry upscaling at 125%; pixel dimensions
+pass through px(). Tkinter lacks antialiased curves, so Pillow renders
+rounded surfaces, circles and icons at 4x resolution, then places cached
+images on Canvas widgets (_IMAGES).
 """
 import ctypes, os, sys, time, tkinter as tk
 from tkinter import ttk, font as tkfont
 
 try:
     from PIL import Image, ImageDraw, ImageTk
-except ImportError:      # mx5editor.py meldet das beim Start
+except ImportError:      # mx5editor.py reports this at startup
     Image = None
 import symbole
 from rigmodel import base_name   # 'Amp 2' -> 'Amp'
 
-# ---------------- Farben und Schriften ----------------
-BG = "#0b0b0e"          # Fensterhintergrund (fast schwarz)
-PANEL = "#141519"       # Seitenleisten, Kopfzeilen
-CARD = "#1e1f24"        # Karten, Eingabefelder
-CARD_HI = "#292a30"     # Karte unter der Maus
-CARD_LO = "#17181c"     # leere Plaetze
-LINE = "#2b2c33"        # Trennlinien, Signallinie
-ACCENT = "#1fc9a1"      # Tuerkisgruen des Web-Editors
+# ---------------- Colors and fonts ----------------
+BG = "#0b0b0e"          # Window background, nearly black
+PANEL = "#141519"       # Sidebars and headers
+CARD = "#1e1f24"        # Cards and input fields
+CARD_HI = "#292a30"     # Hovered card
+CARD_LO = "#17181c"     # Empty slots
+LINE = "#2b2c33"        # Dividers and signal line
+ACCENT = "#1fc9a1"      # Web editor's turquoise accent
 ACCENT_HI = "#43dcb8"
-ACCENT_TXT = "#07110e"  # Text auf Akzentflaeche
+ACCENT_TXT = "#07110e"  # Text on accent surface
 TEXT = "#e8e8ea"
 MUTED = "#8d9099"
 DIM = "#4a4d56"
 KNOB = "#d9dadd"
 DANGER = "#d9443c"
 
-# Plattform: Windows ist die Hauptplattform; macOS (Tk "aqua") und Linux (X11) bekommen eigene
-# Schriften, Kuerzel und Maustasten (siehe Helfer unten), die Windows-Extras fallen dort weg.
+# Windows is the primary platform. macOS (Tk aqua) and Linux (X11) use their own
+# fonts, shortcuts and mouse bindings (helpers below), without Windows-specific features.
 WIN = sys.platform == "win32"
 MAC = sys.platform == "darwin"
 SANS = "Segoe UI" if WIN else ("Helvetica Neue" if MAC else "DejaVu Sans")
 MONO = "Consolas" if WIN else ("Menlo" if MAC else "DejaVu Sans Mono")
-MOD = "Command" if MAC else "Control"            # Tastenkuerzel: <Command-z> statt <Control-z>
-MOD_MASK = 0x0008 if MAC else 0x0004             # event.state: Cmd (aqua: Mod1) bzw. Strg
+MOD = "Command" if MAC else "Control"            # Shortcuts: Command-z instead of Control-z
+MOD_MASK = 0x0008 if MAC else 0x0004             # event.state: Cmd (aqua Mod1) or Ctrl
 
 FONT = (SANS, 10)
 FONT_SMALL = (SANS, 9)
@@ -52,7 +51,7 @@ FONT_HEAD = (SANS, 12, "bold")
 FONT_TITLE = (SANS, 16, "bold")
 FONT_CARD = (SANS, 8, "bold")
 
-# Blockfarben des Geraets (Naeherung an die Anzeige), in der Reihenfolge von MacroColour
+# Approximate device display colors, in MacroColour order
 COLOUR_ORDER = ["Green", "Dark Green", "Yellow", "Orange", "Red", "Pink", "Purple", "Blue", "Light Blue",
                 "White", "Grey", "Turquoise", "Black"]
 COLOURS = {
@@ -61,9 +60,9 @@ COLOURS = {
     "White": "#e8e8e8", "Grey": "#9a9a9a", "Turquoise": "#2fbfae", "Black": "#444444", "Off": "#3a3b41",
 }
 
-S = 1.0                 # Pixelskalierung (1.25 bei 125 %)
-_IMAGES = {}            # (schluessel) -> PhotoImage
-SS = 4                  # Ueberabtastung beim Rendern
+S = 1.0                 # Pixel scaling, 1.25 at 125%
+_IMAGES = {}            # Cache key -> PhotoImage
+SS = 4                  # Rendering supersampling
 
 
 def px(n):
@@ -71,16 +70,16 @@ def px(n):
 
 
 def bind_right(w, fn, add=None):
-    """Rechtsklick binden: Windows/Linux Taste 3, macOS (Tk 8.6 aqua) meldet die rechte Taste
-    als Taste 2 - dort beide."""
+    """Bind right-click: Windows/Linux button 3; Tk 8.6 aqua reports button 2,
+    so bind both on macOS."""
     w.bind("<Button-3>", fn, add=add)
     if MAC:
         w.bind("<Button-2>", fn, add=add)
 
 
 def wheel_step(e):
-    """Mausrad-Ereignis -> Zeilen (positiv = nach unten). Windows und Tk 9: delta in 120er-Schritten,
-    macOS mit Tk 8.6: kleine Werte je Rastung, Linux mit Tk 8.6: Tasten 4/5 ohne delta."""
+    """Mouse wheel event -> rows, positive down. Windows/Tk 9 delta uses 120-step
+    increments; Tk 8.6 macOS uses small deltas; Tk 8.6 Linux uses buttons 4/5."""
     if getattr(e, "num", None) == 4:
         return -1
     if getattr(e, "num", None) == 5:
@@ -94,7 +93,7 @@ def wheel_step(e):
 
 
 def bind_wheel(w, fn, all=False):
-    """fn(e) fuer das Mausrad auf allen Plattformen binden (all=True: bind_all)."""
+    """Bind wheel fn(e) on all platforms; all=True uses bind_all."""
     b = w.bind_all if all else w.bind
     b("<MouseWheel>", fn)
     if not WIN and not MAC:
@@ -103,15 +102,15 @@ def bind_wheel(w, fn, all=False):
 
 
 APP_NAME = "MX-Edit"
-APP_ID = "MXEdit.Editor"          # AppUserModelID: eigene Taskleisten-Gruppe statt python.exe
-ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)   # alle Groessen, die Windows bei 100-200 % braucht
+APP_ID = "MXEdit.Editor"          # AppUserModelID: separate taskbar group instead of python.exe
+ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 96, 128, 256)   # All icon sizes needed by Windows at 100-200%
 
 
 def app_icon(size):
-    """Programm-Icon (Drehregler mit Skalenbogen auf dunkler Kachel) in genau dieser Groesse, mit
-    Pillow 4-fach ueberabgetastet gezeichnet. Kleine Groessen bekommen dickere Linien und weniger
-    Rand, damit der Regler auch mit 16 px lesbar bleibt. Quelle fuer Fenster-, Taskleisten-,
-    EXE-Icon (werkzeuge/exe_bauen.py) und das Logo der Titelleiste."""
+    """App icon: knob with scale arc on dark tile, drawn at requested size with
+    Pillow 4x supersampling. Small sizes use thicker strokes/less padding so
+    16 px remains legible. Source for window/taskbar/executable icons
+    (werkzeuge/exe_bauen.py) and title-bar logo."""
     import math
     Z = size * 4
     im = Image.new("RGBA", (Z, Z), (0, 0, 0, 0))
@@ -123,10 +122,10 @@ def app_icon(size):
     ring_w = Z * (0.13 if small else 0.085)
     r_ring = Z * (0.5 - (0.06 if small else 0.11)) - ring_w / 2
     box = (c - r_ring, c - r_ring, c + r_ring, c + r_ring)
-    d.arc(box, 135, 405, fill=CARD_HI, width=int(ring_w))      # Skala
-    d.arc(box, 135, 330, fill=ACCENT, width=int(ring_w))       # Stellung
-    for a in (135, 330):                                       # runde Enden des Akzentbogens
-        rm = r_ring - ring_w / 2                               # Mitte des Strichs (arc zeichnet nach innen)
+    d.arc(box, 135, 405, fill=CARD_HI, width=int(ring_w))      # Scale
+    d.arc(box, 135, 330, fill=ACCENT, width=int(ring_w))       # Position
+    for a in (135, 330):                                       # Round ends of accent arc
+        rm = r_ring - ring_w / 2                               # Stroke center; arc draws inward
         x, y = c + rm * math.cos(math.radians(a)), c + rm * math.sin(math.radians(a))
         d.ellipse((x - ring_w / 2, y - ring_w / 2, x + ring_w / 2, y + ring_w / 2), fill=ACCENT)
     r_knob = r_ring - ring_w * (1.05 if small else 1.25)
@@ -141,14 +140,14 @@ def app_icon(size):
 
 
 def save_app_icon(path):
-    """app_icon in allen ICON_SIZES als .ico schreiben (jede Groesse eigens gezeichnet)."""
+    """Save app_icon at every ICON_SIZES size to .ico, drawing each separately."""
     imgs = [app_icon(s) for s in ICON_SIZES]
     imgs[-1].save(path, format="ICO", sizes=[(s, s) for s in ICON_SIZES], append_images=imgs[:-1])
 
 
 def app_user_model_id():
-    """Vor dem ersten Fenster aufrufen: eigene App-ID, damit die Taskleiste das Fenster-Icon zeigt
-    und es nicht mit anderen Python-Programmen unter dem Python-Symbol gruppiert."""
+    """Call before the first window: set app ID so taskbar shows its icon
+    instead of grouping with other Python applications."""
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
     except Exception:
@@ -156,10 +155,10 @@ def app_user_model_id():
 
 
 def set_window_icon(top, ico):
-    """Fenster-Icons in der Groesse setzen, die Windows fuer die aktuelle DPI erwartet (Tk selbst
-    gibt nur 16 und 32 px weiter - die Taskleiste rechnet bei 125 % 32 px auf 40 hoch, das wird
-    unscharf). Wird nach jedem neuen Wrapper-Fenster wiederholt (<Map>)."""
-    if not WIN:   # .ico nimmt nur Windows-Tk; sonst ein Bild (Linux: Fenster, macOS: Dock beim Start mit python)
+    """Set icons at sizes Windows expects for current DPI. Tk only forwards
+    16/32 px, so taskbar scaling from 32 to 40 px at 125% blurs. Reapply on
+    every new wrapper window via Map."""
+    if not WIN:   # .ico only on Windows Tk; elsewhere use image (Linux window, macOS Python-launch Dock)
         try:
             top._icon_photo = ImageTk.PhotoImage(app_icon(256))
             top.iconphoto(True, top._icon_photo)
@@ -167,7 +166,7 @@ def set_window_icon(top, ico):
             pass
         return
     try:
-        top.iconbitmap(default=ico)          # Tk-Standard, auch fuer weitere Toplevels
+        top.iconbitmap(default=ico)          # Tk defaults, also for subsequent Toplevels
     except tk.TclError:
         return
     u32 = ctypes.windll.user32
@@ -196,7 +195,7 @@ def set_window_icon(top, ico):
 
 
 def dpi_aware():
-    """Vor tk.Tk() aufrufen: Fenster in echter Aufloesung statt hochskaliert."""
+    """Call before tk.Tk(): render at native resolution, not upscaled."""
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
@@ -204,12 +203,12 @@ def dpi_aware():
 
 
 def setup(root, scale=1.0):
-    """Skalierung ermitteln, Grundfarben und ttk-Bildlaufleisten einstellen. scale = Faktor der
-    Einstellung 'Interface size' zusaetzlich zur Windows-Skalierung: 'tk scaling' vergroessert die
-    Punkt-Schriften, und px() folgt ueber winfo_fpixels."""
+    """Determine scale, configure base colors and ttk scrollbars. scale adds
+    Interface size to Windows scaling; tk scaling enlarges point fonts,
+    px() follows via winfo_fpixels."""
     global S, _ROOT
-    if MAC:   # aqua rechnet mit 72 dpi (1 Punkt = 1 Pixel): auf 96 dpi wie Windows bringen, sonst wird alles
-        # um ein Viertel kleiner (Retina verdoppelt macOS selbst)
+    if MAC:   # Aqua uses 72 dpi (1 point=1 pixel); normalize to Windows-like 96 dpi to avoid
+        # a 25% size reduction. macOS handles Retina doubling itself.
         root.tk.call("tk", "scaling", 96.0 / 72.0)
     if scale != 1.0:
         root.tk.call("tk", "scaling", float(root.tk.call("tk", "scaling")) * scale)
@@ -226,15 +225,15 @@ def setup(root, scale=1.0):
         st.map(name, background=[("active", DIM), ("pressed", DIM)], arrowcolor=[("active", TEXT)])
 
 
-# ---------------- Bilder (geglaettete Formen) ----------------
+# ---------------- Antialiased image shapes ----------------
 def _evict(cache, limit):
-    """Cache verkleinern, sobald er mehr als limit Bilder haelt. Nur Bilder, die gerade nirgends
-    angezeigt werden, fliegen raus: verliert ein angezeigtes PhotoImage seine letzte Referenz,
-    loescht Tk es und das Canvas-Element bleibt leer, bis es neu gezeichnet wird."""
+    """Trim cache above limit, removing only images not currently displayed.
+    Losing a displayed PhotoImage's last reference deletes it in Tk,
+    leaving the Canvas item blank until redrawn."""
     if len(cache) <= limit:
         return
     for k, im in list(cache.items()):
-        if isinstance(k, tuple) and k[:1] == ("md",):   # Modell-Symbole der Blockauswahl: begrenzt, vorgewaermt (warm_model_icons)
+        if isinstance(k, tuple) and k[:1] == ("md",):   # Bounded model-picker icon cache, prewarmed by warm_model_icons
             continue
         try:
             used = _ROOT is not None and int(_ROOT.tk.call("image", "inuse", str(im)))
@@ -245,15 +244,15 @@ def _evict(cache, limit):
 
 
 def _image(key, w, h, draw_fn, alpha=None):
-    """Bild aus dem Cache oder neu mit draw_fn(dr, W, H) in SS-facher Groesse gezeichnet;
-    alpha < 1 blendet das ganze Bild ab (ausgeschaltete Bloecke)."""
+    """Get cached image or draw via draw_fn(dr,W,H) at SS scale.
+    alpha<1 dims the complete image for disabled blocks."""
     w, h = max(1, int(w)), max(1, int(h))
     im = _IMAGES.get(key)
     if im is None:
         _evict(_IMAGES, 600)
         pic = Image.new("RGBA", (w * SS, h * SS), (0, 0, 0, 0))
         dr = ImageDraw.Draw(pic)
-        dr.pic = pic   # fuer draw_fn, die fertige Bilder einkopieren (model_img fit)
+        dr.pic = pic   # For draw_fn callbacks copying existing images (model_img fit)
         draw_fn(dr, w * SS, h * SS)
         if alpha is not None:
             pic.putalpha(pic.getchannel("A").point(lambda a: int(a * alpha)))
@@ -267,11 +266,11 @@ def rrect_img(w, h, r, fill, outline=None, width=0):
         dr.rounded_rectangle([0, 0, W - 1, H - 1], radius=r * SS, fill=fill, outline=outline, width=width * SS)
     w, h = max(1, int(w)), max(1, int(h))
     key = ("rr", w, h, r, fill, outline, width)
-    k = int(r + width) + 2   # Ecke samt Rahmen
+    k = int(r + width) + 2   # Corner including border
     if w * h <= 40000 or w <= 2 * k or h <= 2 * k or key in _IMAGES:
         return _image(key, w, h, d)
-    # Grosse Flaechen (Overlay-Karten): nur eine kleine Vorlage geglaettet zeichnen und zerlegen -
-    # Ecken einkopieren, die geraden Kanten strecken. Sieht gleich aus, statt ~30 ms je Groesse ~1 ms.
+    # Large overlay surfaces: antialias a small template, split it, copy corners
+    # and stretch straight edges. Same appearance, ~1 ms instead of ~30 ms per size.
     _evict(_IMAGES, 600)
     n = 2 * k + 1
     pic = Image.new("RGBA", (n * SS, n * SS), (0, 0, 0, 0))
@@ -296,7 +295,7 @@ def circle_img(dia, fill, outline=None, width=0):
 
 
 def rrect(c, x, y, w, h, r, fill, outline=None, width=0, tags=()):
-    """Abgerundetes Rechteck auf einen Canvas legen (fill '' = nur Rahmen)."""
+    """Rounded rectangle on Canvas; empty fill means border only."""
     x, y, w, h = int(x), int(y), int(w), int(h)
     if Image is None:
         return c.create_rectangle(x, y, x + w, y + h, fill=fill, outline=outline or fill, width=width or 1, tags=tags)
@@ -312,28 +311,28 @@ def circle(c, cx, cy, dia, fill, outline=None, width=0, tags=()):
 
 
 def icon_img(kind, colour, size=24):
-    """Symbole der Seitenleiste und der Kette, mit Pillow gezeichnet."""
+    """Sidebar/chain icons drawn with Pillow."""
     def d(dr, W, H):
-        u = W / 24.0           # Einheit: 1/24 der Symbolbreite
+        u = W / 24.0           # Units: 1/24 of icon width
         lw = max(1, int(2 * u))
         cx, cy = W / 2, H / 2
-        if kind == "rigs":     # drei Regler
+        if kind == "rigs":     # Three sliders
             for i, dx in enumerate((-4, 4, -2)):
                 y = cy + (i - 1) * 8 * u
                 dr.line([cx - 11 * u, y, cx + 11 * u, y], fill=colour, width=lw)
                 dr.ellipse([cx + (dx - 3) * u, y - 3 * u, cx + (dx + 3) * u, y + 3 * u], fill=BG, outline=colour, width=lw)
-        elif kind == "setlist":   # Liste: Farbkaestchen + Zeile, drei Eintraege
+        elif kind == "setlist":   # List: color swatch and text line, three entries
             for i in (-1, 0, 1):
                 y = cy + i * 7.5 * u
                 dr.rounded_rectangle([cx - 11 * u, y - 2.5 * u, cx - 6 * u, y + 2.5 * u], radius=1.2 * u, fill=colour)
                 dr.line([cx - 3 * u, y, cx + 11 * u, y], fill=colour, width=lw)
-        elif kind == "hw":     # Fussschalter
+        elif kind == "hw":     # Footswitch
             dr.rounded_rectangle([cx - 11 * u, cy - 9 * u, cx + 11 * u, cy + 9 * u], radius=4 * u, outline=colour, width=lw)
             dr.ellipse([cx - 4 * u, cy - 4 * u, cx + 4 * u, cy + 4 * u], fill=colour)
         elif kind == "folder":
             dr.polygon([cx - 11 * u, cy - 7 * u, cx - 3 * u, cy - 7 * u, cx - 1 * u, cy - 4 * u, cx + 11 * u, cy - 4 * u,
                         cx + 11 * u, cy + 8 * u, cx - 11 * u, cy + 8 * u], outline=colour, width=lw)
-        elif kind == "live":   # USB-Symbol (Dreizack): Pfeil oben, Kreis unten, links Kreis, rechts Quadrat
+        elif kind == "live":   # USB trident: top arrow, bottom circle, left circle, right square
             lw = max(1, int(1.8 * u))
             dr.line([cx, cy - 8 * u, cx, cy + 7 * u], fill=colour, width=lw)
             dr.polygon([cx, cy - 12 * u, cx - 3.2 * u, cy - 7 * u, cx + 3.2 * u, cy - 7 * u], fill=colour)
@@ -344,20 +343,20 @@ def icon_img(kind, colour, size=24):
             dr.line([cx, cy + 1.5 * u, cx + 6.5 * u, cy - 3 * u, cx + 6.5 * u, cy - 5 * u], fill=colour, width=lw,
                     joint="curve")
             dr.rectangle([cx + 4.3 * u, cy - 9.5 * u, cx + 8.7 * u, cy - 5.1 * u], fill=colour)
-        elif kind == "close":  # x zum Schliessen
+        elif kind == "close":  # Close x
             lw = max(1, int(2.2 * u))
             dr.line([cx - 6 * u, cy - 6 * u, cx + 6 * u, cy + 6 * u], fill=colour, width=lw)
             dr.line([cx - 6 * u, cy + 6 * u, cx + 6 * u, cy - 6 * u], fill=colour, width=lw)
-        elif kind == "tuner":  # Stimmgabel
+        elif kind == "tuner":  # Tuning fork
             dr.line([cx - 6 * u, cy - 11 * u, cx - 6 * u, cy - 2 * u], fill=colour, width=lw)
             dr.line([cx + 6 * u, cy - 11 * u, cx + 6 * u, cy - 2 * u], fill=colour, width=lw)
             dr.arc([cx - 6 * u, cy - 8 * u, cx + 6 * u, cy + 4 * u], 0, 180, fill=colour, width=lw)
             dr.line([cx, cy + 4 * u, cx, cy + 12 * u], fill=colour, width=lw)
             dr.line([cx - 4 * u, cy + 12 * u, cx + 4 * u, cy + 12 * u], fill=colour, width=lw)
-        elif kind == "plug":   # Klinkenstecker (Eingang)
+        elif kind == "plug":   # Jack plug (input)
             dr.line([cx, cy - 12 * u, cx, cy + 2 * u], fill=colour, width=max(1, int(3 * u)))
             dr.rounded_rectangle([cx - 3 * u, cy + 1 * u, cx + 3 * u, cy + 12 * u], radius=2 * u, fill=colour)
-        elif kind == "trash":   # Muelleimer (Block entfernen)
+        elif kind == "trash":   # Trash can (remove block)
             dr.line([cx - 10 * u, cy - 6 * u, cx + 10 * u, cy - 6 * u], fill=colour, width=lw)
             dr.line([cx - 4 * u, cy - 6 * u, cx - 4 * u, cy - 10 * u, cx + 4 * u, cy - 10 * u, cx + 4 * u, cy - 6 * u],
                     fill=colour, width=lw, joint="curve")
@@ -365,52 +364,52 @@ def icon_img(kind, colour, size=24):
                        outline=colour, width=lw)
             for dx in (-3, 0, 3):
                 dr.line([cx + dx * u, cy, cx + dx * u, cy + 8 * u], fill=colour, width=max(1, lw - 1))
-        elif kind == "plus":    # + (neues Preset)
+        elif kind == "plus":    # Plus (new preset)
             lw = max(1, int(2.2 * u))
             dr.line([cx - 8 * u, cy, cx + 8 * u, cy], fill=colour, width=lw)
             dr.line([cx, cy - 8 * u, cx, cy + 8 * u], fill=colour, width=lw)
-        elif kind == "save":    # Diskette (Preset ueberschreiben)
+        elif kind == "save":    # Disk (overwrite preset)
             dr.polygon([cx - 10 * u, cy - 10 * u, cx + 6 * u, cy - 10 * u, cx + 10 * u, cy - 6 * u,
                         cx + 10 * u, cy + 10 * u, cx - 10 * u, cy + 10 * u], outline=colour, width=lw)
             dr.rectangle([cx - 5 * u, cy - 10 * u, cx + 4 * u, cy - 4 * u], outline=colour, width=lw)
             dr.rectangle([cx - 6 * u, cy + 2 * u, cx + 6 * u, cy + 10 * u], fill=colour)
-        elif kind == "undo":    # Pfeil im Bogen zurueck (Aenderungen verwerfen)
+        elif kind == "undo":    # Back-curving arrow (discard edits)
             import math
             lw = max(1, int(2.2 * u))
             r, ox, oy = 7.5 * u, cx + 1.5 * u, cy + 1.5 * u
             dr.arc([ox - r, oy - r, ox + r, oy + r], 200, 120, fill=colour, width=lw)
             t = math.radians(200)
             px_, py_ = ox + r * math.cos(t), oy + r * math.sin(t)
-            dx, dy = math.sin(t), -math.cos(t)           # Laufrichtung gegen den Uhrzeigersinn
+            dx, dy = math.sin(t), -math.cos(t)           # Counterclockwise direction
             nx, ny = -dy, dx
             dr.polygon([px_ + dx * 5 * u, py_ + dy * 5 * u, px_ + nx * 4.5 * u - dx * 1 * u, py_ + ny * 4.5 * u - dy * 1 * u,
                         px_ - nx * 4.5 * u - dx * 1 * u, py_ - ny * 4.5 * u - dy * 1 * u], fill=colour)
-        elif kind == "looper":  # Kreispfeil im Uhrzeigersinn, Aufnahmepunkt in der Mitte
+        elif kind == "looper":  # Clockwise circular arrow with recording dot at center
             import math
             lw = max(1, int(2.2 * u))
             r = 9 * u
             dr.arc([cx - r, cy - r, cx + r, cy + r], -60, 240, fill=colour, width=lw)
-            t = math.radians(240)                         # Bogenende oben links, Spitze zeigt in die Luecke
+            t = math.radians(240)                         # Arc ends at upper left; arrowhead points into the gap
             px_, py_ = cx + r * math.cos(t), cy + r * math.sin(t)
-            dx, dy = -math.sin(t), math.cos(t)           # Laufrichtung im Uhrzeigersinn (Bildschirm)
+            dx, dy = -math.sin(t), math.cos(t)           # Clockwise on screen
             nx, ny = -dy, dx
             dr.polygon([px_ + dx * 5 * u, py_ + dy * 5 * u, px_ + nx * 4.5 * u - dx * 1 * u, py_ + ny * 4.5 * u - dy * 1 * u,
                         px_ - nx * 4.5 * u - dx * 1 * u, py_ - ny * 4.5 * u - dy * 1 * u], fill=colour)
             dr.ellipse([cx - 3.5 * u, cy - 3.5 * u, cx + 3.5 * u, cy + 3.5 * u], fill=colour)
-        elif kind == "record":  # gefuellter Kreis
+        elif kind == "record":  # Filled circle
             dr.ellipse([cx - 8 * u, cy - 8 * u, cx + 8 * u, cy + 8 * u], fill=colour)
-        elif kind == "play":    # Dreieck nach rechts
+        elif kind == "play":    # Right-pointing triangle
             dr.polygon([cx - 6 * u, cy - 9 * u, cx + 9 * u, cy, cx - 6 * u, cy + 9 * u], fill=colour)
-        elif kind == "stop":    # Quadrat
+        elif kind == "stop":    # Square
             dr.rounded_rectangle([cx - 7.5 * u, cy - 7.5 * u, cx + 7.5 * u, cy + 7.5 * u], radius=1.5 * u, fill=colour)
-        elif kind == "mix":     # zwei Zweige laufen zusammen (Mischpunkt der parallelen Wege)
+        elif kind == "mix":     # Two converging branches (parallel-path mix point)
             lw = max(1, int(2.2 * u))
             for sgn in (-1, 1):
                 pts = _round_path([(cx - 9 * u, cy + sgn * 7 * u), (cx - 3 * u, cy + sgn * 7 * u), (cx + 1 * u, cy),
                                    (cx + 4 * u, cy)], 4 * u)
                 dr.line(pts, fill=colour, width=lw, joint="curve")
             dr.polygon([cx + 10 * u, cy, cx + 3.5 * u, cy - 4.5 * u, cx + 3.5 * u, cy + 4.5 * u], fill=colour)
-        elif kind == "ir":      # Impulsantwort: Nadel, danach abklingende Schwingung
+        elif kind == "ir":      # Impulse response: spike followed by decaying oscillation
             import math
             pts = []
             for i in range(41):
@@ -419,7 +418,7 @@ def icon_img(kind, colour, size=24):
                 pts.append((cx - 7 * u + t * 18 * u, cy - a * u))
             dr.line([cx - 11 * u, cy, cx - 7 * u, cy], fill=colour, width=lw)
             dr.line(pts, fill=colour, width=lw, joint="curve")
-        elif kind == "nam":     # kleines neuronales Netz: 2-3-2 Knoten
+        elif kind == "nam":     # Small 2-3-2-node neural network
             layers = [(-8, (-5, 5)), (0, (-8, 0, 8)), (8, (-5, 5))]
             r = 2.6 * u
             for (x1, ys1), (x2, ys2) in zip(layers, layers[1:]):
@@ -430,16 +429,16 @@ def icon_img(kind, colour, size=24):
                 for y in ys:
                     dr.ellipse([cx + x * u - r, cy + y * u - r, cx + x * u + r, cy + y * u + r], fill=BG,
                                outline=colour, width=lw)
-        elif kind == "gear":    # Zahnrad (Einstellungen)
+        elif kind == "gear":    # Gear (settings)
             import math
             pts = []
             for i in range(8):
-                for da, rr in ((-0.3, 7.5), (-0.17, 10.5), (0.17, 10.5), (0.3, 7.5)):   # ein Zahn je 45 Grad
+                for da, rr in ((-0.3, 7.5), (-0.17, 10.5), (0.17, 10.5), (0.3, 7.5)):   # One tooth every 45 degrees
                     a = i * math.pi / 4 + da
                     pts.append((cx + rr * u * math.cos(a), cy + rr * u * math.sin(a)))
             dr.polygon(pts, outline=colour, width=lw)
             dr.ellipse([cx - 3.5 * u, cy - 3.5 * u, cx + 3.5 * u, cy + 3.5 * u], outline=colour, width=lw)
-        elif kind == "minimize":   # Fensterknoepfe der eigenen Titelleiste
+        elif kind == "minimize":   # Custom title-bar window buttons
             dr.line([cx - 6 * u, cy, cx + 6 * u, cy], fill=colour, width=max(1, int(1.2 * u)))
         elif kind == "maximize":
             dr.rectangle([cx - 6 * u, cy - 6 * u, cx + 6 * u, cy + 6 * u], outline=colour, width=max(1, int(1.2 * u)))
@@ -452,20 +451,20 @@ def icon_img(kind, colour, size=24):
             w_ = max(1, int(1.2 * u))
             dr.line([cx - 6 * u, cy - 6 * u, cx + 6 * u, cy + 6 * u], fill=colour, width=w_)
             dr.line([cx - 6 * u, cy + 6 * u, cx + 6 * u, cy - 6 * u], fill=colour, width=w_)
-        elif kind == "stereo":  # zwei Kreise, leicht ineinander (Ausgang)
+        elif kind == "stereo":  # Two slightly overlapping circles (output)
             dr.ellipse([cx - 11 * u, cy - 7 * u, cx + 3 * u, cy + 7 * u], outline=colour, width=lw)
             dr.ellipse([cx - 3 * u, cy - 7 * u, cx + 11 * u, cy + 7 * u], outline=colour, width=lw)
-        elif kind == "guitar":  # E-Gitarre als Umriss (Strat-Form), Hals nach rechts oben (Eingang)
+        elif kind == "guitar":  # Electric guitar outline, Strat shape, neck pointing upper right (input)
             import math
             u = W / 33.0
-            t = max(1, int(1.6 * u))             # Strichstaerke
+            t = max(1, int(1.6 * u))             # Stroke width
             ang = math.radians(-45)
             ca, sa = math.cos(ang), math.sin(ang)
 
-            def pt(x, y):   # Gitarrenkoordinaten (x laengs zum Kopf, y quer; Mitte bei x=4) drehen
+            def pt(x, y):   # Rotate guitar coordinates: x along neck, y across, center at x=4
                 return (cx + ((x - 4) * ca - y * sa) * u, cy + ((x - 4) * sa + y * ca) * u)
 
-            def spline(ctrl, n=6):   # Catmull-Rom durch die Stuetzpunkte (offen)
+            def spline(ctrl, n=6):   # Open Catmull-Rom curve through control points
                 out = []
                 for i in range(len(ctrl) - 1):
                     p0 = ctrl[max(i - 1, 0)]
@@ -482,19 +481,19 @@ def icon_img(kind, colour, size=24):
                            (-1.0, 3.9), (0.9, 3.5), (0.7, 2.0), (1.0, 1.8)])
             outline = body + [(13.0, 1.7), (17.6, 2.4), (21.0, 0.0), (18.6, -3.0), (13.0, -1.7), (1.0, -1.8)]
             dr.line([pt(x, y) for x, y in outline], fill=colour, width=t, joint="curve")
-            dr.line([pt(13.0, -1.7), pt(13.0, 1.7)], fill=colour, width=t)          # Sattel
-            for x, y in ((14.8, -2.2), (16.2, -2.5), (17.6, -2.8)):                   # Mechaniken
+            dr.line([pt(13.0, -1.7), pt(13.0, 1.7)], fill=colour, width=t)          # Nut
+            for x, y in ((14.8, -2.2), (16.2, -2.5), (17.6, -2.8)):                   # Tuning machines
                 dr.line([pt(x, y), pt(x + 0.4, y - 1.8)], fill=colour, width=t)
-            for x in (-2.5, -5.0):                                                    # Tonabnehmer
+            for x in (-2.5, -5.0):                                                    # Pickups
                 dr.line([pt(x, -2.4), pt(x, 2.4)], fill=colour, width=t)
-            for x, y in ((-8.0, 2.6), (-9.8, 1.4)):                                   # Regler
+            for x, y in ((-8.0, 2.6), (-9.8, 1.4)):                                   # Knobs
                 px_, py_ = pt(x, y)
                 dr.ellipse([px_ - 0.8 * u, py_ - 0.8 * u, px_ + 0.8 * u, py_ + 0.8 * u], fill=colour)
     return _image(("ic", kind, colour, size), size, size, d)
 
 
 def pedal_img(w, h):
-    """Expression-Pedal von oben (Hardware-Dialog)."""
+    """Top view of expression pedal for Hardware dialog."""
     def d(dr, W, H):
         u = W / 80.0
         cx = W / 2
@@ -510,17 +509,16 @@ def pedal_img(w, h):
 
 
 def model_img(name, model=None, w=84, h=59, dim=False, fit=False):
-    """Flaches Modell-Symbol (symbole.py) fuer Block `name` und Amp-/Cab-Modell `model`,
-    Seitenverhaeltnis 10:7; dim = abgeblendet (Block aus). fit=True: das Symbol wird auf
-    seinen sichtbaren Inhalt beschnitten und so gross wie moeglich in w x h eingepasst
-    (schmale Treter fuellen die Hoehe, breite Amps die Breite) - fuer die Signalkette."""
+    """Flat symbole.py icon for block name and amp/cab model, aspect ratio 10:7.
+    dim fades disabled blocks. fit crops visible content and fits w x h:
+    narrow pedals fill height, wide amps fill width, for the signal chain."""
     look = symbole.look_for(base_name(name or ""), model)
     if not fit:
         return _image(("md", name, model, w, h, dim), w, h, lambda dr, W, H: symbole.zeichnen(dr, W, H, look),
                       alpha=0.4 if dim else None)
 
     def draw(dr, W, H):
-        big = Image.new("RGBA", (W * 2, int(W * 1.4)), (0, 0, 0, 0))   # 10:7, doppelt so gross wie noetig
+        big = Image.new("RGBA", (W * 2, int(W * 1.4)), (0, 0, 0, 0))   # 10:7, twice the required size
         symbole.zeichnen(ImageDraw.Draw(big), big.width, big.height, look)
         box = big.getbbox()
         if not box:
@@ -533,7 +531,7 @@ def model_img(name, model=None, w=84, h=59, dim=False, fit=False):
 
 
 def shadow_img(w, h, r, spread):
-    """Weicher Schatten unter einer abgerundeten Flaeche w x h (Bild ist um spread groesser)."""
+    """Soft shadow under rounded w x h surface; image extends by spread."""
     key = ("sh", w, h, r, spread)
     im = _IMAGES.get(key)
     if im is None:
@@ -546,31 +544,30 @@ def shadow_img(w, h, r, spread):
     return im
 
 
-# ---------------- Eigener Fensterrahmen ----------------
-_WNDPROCS = []   # Rueckruf-Objekte am Leben halten (sonst stuerzt Windows beim naechsten Ereignis ab)
+# ---------------- Custom window frame ----------------
+_WNDPROCS = []   # Keep callbacks alive, otherwise Windows crashes on the next event
 
 
 def _hwnd(top):
-    """Aeusseres Windows-Fenster (Tk-'wrapper') eines Toplevels. GetAncestor statt GetParent:
-    bei Dialogen (transient) liefert GetParent je nach Zustand den Besitzer (das Hauptfenster)."""
+    """Outer Tk wrapper window for a Toplevel. Use GetAncestor, not GetParent:
+    transient dialogs may report the owner/main window as their parent."""
     return ctypes.windll.user32.GetAncestor(top.winfo_id(), 2)   # GA_ROOT
 
 
 def native_frameless(top):
-    """Windows-Titelleiste und -Rahmen eines Toplevels ausblenden, ohne overrideredirect: das
-    Fenster bleibt ein normales Fenster (Taskleiste, Alt+Tab, Minimieren, Aero Snap, Schatten und
-    runde Ecken unter Windows 11). Technik: die Fensterprozedur wird unterklassiert und
-    WM_NCCALCSIZE macht das ganze Fenster zur Client-Flaeche; maximiert wird auf den Arbeits-
-    bereich des Monitors begrenzt (sonst ragt das Fenster um die Rahmenbreite ueber den Rand).
-    Gibt True zurueck, wenn es geklappt hat."""
+    """Hide native Windows title/frame without overrideredirect, retaining taskbar,
+    Alt-Tab, minimize, Aero Snap, shadows and Windows 11 round corners.
+    Subclass window procedure; WM_NCCALCSIZE expands client area to full window.
+    Limit maximization to monitor work area, avoiding frame-width overshoot.
+    Return True on success."""
     if sys.platform != "win32":
         return False
     try:
         from ctypes import wintypes
         user32, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
         if not getattr(top, "_frameless_watch", False):
-            # Tk erzeugt das aeussere Fenster bei manchen Aufrufen neu (z. B. resizable()), dann ist
-            # die Unterklasse weg: bei jedem Anzeigen/Groessenwechsel pruefen und nachholen
+            # Tk recreates the outer wrapper for some calls, e.g. resizable(), losing
+            # the subclass. Check/reapply on every show/resize.
             top._frameless_watch = True
             top._frameless_hwnd = None
 
@@ -585,7 +582,7 @@ def native_frameless(top):
             top.bind("<Map>", check, add="+")
             top.bind("<Configure>", check, add="+")
         top.update_idletasks()
-        if not top.winfo_ismapped():   # noch nicht sichtbar: <Map> holt es nach
+        if not top.winfo_ismapped():   # Not visible yet: Map handles it later
             return True
         hwnd = _hwnd(top)
         if hwnd == top._frameless_hwnd:
@@ -607,7 +604,7 @@ def native_frameless(top):
 
         def proc(h, msg, wp, lp):
             try:
-                if msg == 0x0083 and wp:   # WM_NCCALCSIZE: kein Rahmen, keine Titelleiste
+                if msg == 0x0083 and wp:   # WM_NCCALCSIZE: no frame or title bar
                     if user32.IsZoomed(h):
                         mi = MONITORINFO()
                         mi.cbSize = ctypes.sizeof(MONITORINFO)
@@ -622,9 +619,9 @@ def native_frameless(top):
         old[0] = user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(cb, ctypes.c_void_p))   # GWLP_WNDPROC
         if not old[0]:
             return False
-        for attr, val in ((20, 1),                                   # dunkler Modus
-                          (33, 2),                                   # runde Ecken (Windows 11)
-                          (34, int(LINE[5:7] + LINE[3:5] + LINE[1:3], 16))):   # Rahmenfarbe (COLORREF)
+        for attr, val in ((20, 1),                                   # Dark mode
+                          (33, 2),                                   # Round corners (Windows 11)
+                          (34, int(LINE[5:7] + LINE[3:5] + LINE[1:3], 16))):   # Frame color (COLORREF)
             v = ctypes.c_int(val)
             try:
                 dwm.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(v), ctypes.sizeof(v))
@@ -638,10 +635,10 @@ def native_frameless(top):
 
 
 def _nc_drag(top, ht):
-    """Die native Fensterbewegung/Groessenaenderung starten (ht = HTCAPTION, HTLEFT, ...).
-    Nur einstellen (PostMessage), nicht SendMessage: die modale Schleife von Windows darf nicht
-    in einem Python-Rueckruf laufen, sonst stuerzt _tkinter bei verschachtelten Tk-Ereignissen ab
-    (PyEval_RestoreThread ohne Thread-Zustand). So startet sie aus der Tk-Hauptschleife."""
+    """Start native move/resize (ht=HTCAPTION, HTLEFT, ...). PostMessage only:
+    SendMessage would enter Windows' modal loop from a Python callback, causing
+    _tkinter crashes on nested events (PyEval_RestoreThread without thread state).
+    Posting starts it from the Tk main loop instead."""
     from ctypes import wintypes
     user32 = ctypes.windll.user32
     pt = wintypes.POINT()
@@ -651,10 +648,9 @@ def _nc_drag(top, ht):
 
 
 class TitleBar(tk.Frame):
-    """Eigene Titelleiste im Stil der Oberflaeche: Name links, Minimieren/Maximieren/Schliessen
-    rechts; Ziehen bewegt das Fenster (mit Aero Snap), Doppelklick maximiert. Legt auch die
-    unsichtbaren Griffe an den Raendern fuer die Groessenaenderung an. Ohne Windows (oder wenn
-    native_frameless scheitert) wird die Leiste nicht gezeigt; .active sagt, ob sie aktiv ist."""
+    """Custom title bar: name left, minimize/maximize/close right. Drag moves with
+    Aero Snap; double-click maximizes. Adds invisible edge resize handles.
+    Hidden outside Windows or if native_frameless fails; active reports availability."""
     H = 34
     GRIP = 5
     _CURSORS = {"n": "size_ns", "s": "size_ns", "w": "size_we", "e": "size_we",
@@ -671,11 +667,11 @@ class TitleBar(tk.Frame):
         self.pack_propagate(False)
         self._press = None
         drag = [self]
-        if logo:   # Schriftzug links, so breit wie die Symbolleiste darunter
+        if logo:   # Logo at left, matching sidebar width below
             lf = tk.Frame(self, bg=BG, width=px(logo_w))
             lf.pack(side="left", fill="y")
             lf.pack_propagate(False)
-            if logo_icon and Image is not None:   # Programm-Icon vor dem Schriftzug
+            if logo_icon and Image is not None:   # App icon before logo text
                 n = int(px(20))
                 self._logo_img = ImageTk.PhotoImage(app_icon(n))
                 ll = tk.Label(lf, text=" " + logo, image=self._logo_img, compound="left", bg=BG, fg=TEXT,
@@ -699,7 +695,7 @@ class TitleBar(tk.Frame):
             c.bind("<Button-1>", lambda e, k=kind: self._btn_press(k, e))
             self.btns[kind] = c
             self._btn(kind, False)
-        self._last = buttons[0] if buttons else None   # ganz rechts (side="right" zuerst gepackt)
+        self._last = buttons[0] if buttons else None   # Far right; packed with side=right first
         self._edge_press = None
         for w in drag:
             self.drag_from(w)
@@ -713,7 +709,7 @@ class TitleBar(tk.Frame):
         self.after(50, self._on_configure)
 
     def drag_from(self, w):
-        """Widget w (z. B. eine Kopfzeile) bewegt beim Ziehen das Fenster, Doppelklick maximiert."""
+        """Make widget w draggable to move window, double-click to maximize."""
         w.bind("<Button-1>", lambda e: setattr(self, "_press", (e.x_root, e.y_root)), add="+")
         w.bind("<B1-Motion>", self._motion, add="+")
         w.bind("<ButtonRelease-1>", lambda e: setattr(self, "_press", None), add="+")
@@ -722,7 +718,7 @@ class TitleBar(tk.Frame):
     def _motion(self, e):
         if self._press and (abs(e.x_root - self._press[0]) > 3 or abs(e.y_root - self._press[1]) > 3):
             self._press = None
-            _nc_drag(self.top, 2)   # HTCAPTION: native Bewegung (Aero Snap, aus Maximiert herausziehen)
+            _nc_drag(self.top, 2)   # HTCAPTION: native move, Aero Snap and dragging out of maximized state
 
     def set_title(self, text):
         if self.active:
@@ -739,7 +735,7 @@ class TitleBar(tk.Frame):
 
     def _click(self, kind, e):
         c = self.btns[kind]
-        if self._edge_press:   # war der Beginn einer Groessenaenderung am Rand
+        if self._edge_press:   # This press started an edge resize
             self._edge_press = None
             return
         if not (0 <= e.x < c.winfo_width() and 0 <= e.y < c.winfo_height()):
@@ -752,8 +748,8 @@ class TitleBar(tk.Frame):
             self.top.iconify()
 
     def _edge(self, kind, e):
-        """Randzone eines Knopfs fuer die Groessenaenderung (die Griffe liegen nicht ueber den
-        Knoepfen, sonst decken sie die Hover-Farbe ab): 'n', 'e', 'ne' oder None."""
+        """Button edge resize zone: n/e/ne or None. Handles do not cover buttons,
+        otherwise they would obscure hover colors."""
         if self.zoomed():
             return None
         B = px(self.GRIP)
@@ -794,11 +790,11 @@ class TitleBar(tk.Frame):
         self._zoomed = z
         self._btn("maximize", False)
         g, B = self.grips, px(self.GRIP)
-        if z:   # maximiert: keine Griffe
+        if z:   # Maximized: no resize handles
             for f in g.values():
                 f.place_forget()
             return
-        bw = px(46) * len(self.btns)   # ueber den Knoepfen uebernehmen diese den Rand (_edge)
+        bw = px(46) * len(self.btns)   # Buttons themselves handle their top/right edge via _edge
         g["n"].place(x=B, y=0, relwidth=1, width=-B - bw, height=B)
         g["s"].place(x=B, rely=1, y=-B, relwidth=1, width=-2 * B, height=B)
         g["w"].place(x=0, y=B, relheight=1, height=-2 * B, width=B)
@@ -815,17 +811,17 @@ class TitleBar(tk.Frame):
                 f.lift()
 
 
-# ---------------- Aufklappfenster (Kontextmenue, Farbwahl) ----------------
+# ---------------- Popups (context menu, color picker) ----------------
 class _Popup(tk.Toplevel):
-    """Randloses Aufklappfenster mit runden Ecken (Windows: Transparenzfarbe KEY). Schliesst bei
-    Escape, bei einem Klick daneben und wenn der Fokus die Familie (Menue + Untermenue) verlaesst."""
+    """Borderless round-corner popup (Windows transparent color KEY).
+    Close on Escape, outside click, or focus leaving menu/submenu family."""
     KEY = "#010203"
 
     def __init__(self, parent, owner=None):
         super().__init__(parent)
         self.withdraw()
         self.overrideredirect(True)
-        if MAC:   # aqua: durchsichtiges Fenster statt Transparenzfarbe
+        if MAC:   # Aqua: transparent window instead of color key
             try:
                 self.wm_attributes("-transparent", True)
                 self.KEY = "systemTransparent"
@@ -838,7 +834,7 @@ class _Popup(tk.Toplevel):
             self.wm_attributes("-topmost", True)
         except tk.TclError:
             pass
-        self.owner = owner       # uebergeordnetes Menue (Untermenue) oder None
+        self.owner = owner       # Parent menu for submenu, otherwise None
         self.child = None
         self.c = tk.Canvas(self, bg=self.KEY, highlightthickness=0, bd=0)
         self.c.pack(fill="both", expand=True)
@@ -882,8 +878,8 @@ class _Popup(tk.Toplevel):
         p.close()
 
     def show_at(self, x, y, w, h, above=None):
-        """Bei (x, y) zeigen, am Hauptbildschirm nicht ueber den Rand hinaus; above = y-Kante,
-        ueber der das Fenster erscheint, wenn es unten nicht passt."""
+        """Show at x,y within primary-screen bounds; above is the y edge above which
+        to place it if there is insufficient space below."""
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         if x < sw and x + w > sw:
             x = max(0, sw - w)
@@ -892,7 +888,7 @@ class _Popup(tk.Toplevel):
         self.geometry("%dx%d+%d+%d" % (w, h, x, y))
         self.c.configure(width=w, height=h)
         fade = ANIM
-        if fade:   # einblenden (Tk: -alpha zusammen mit -transparentcolor geht unter Windows)
+        if fade:   # Fade in; Windows Tk supports alpha together with transparentcolor
             try:
                 self.wm_attributes("-alpha", 0.0)
             except tk.TclError:
@@ -920,9 +916,9 @@ class _Popup(tk.Toplevel):
 
 
 class PopupMenu(_Popup):
-    """Kontextmenue im Stil der Oberflaeche (ersetzt tk.Menu, gleiche Grundbefehle):
-    add_command(label, command, state, swatch=Farbe), add_separator(), add_cascade(label, menu),
-    tk_popup(x, y). Befehle laufen erst nach dem Schliessen."""
+    """Styled tk.Menu replacement: add_command(label,command,state,swatch=color),
+    add_separator(), add_cascade(label,menu), tk_popup(x,y).
+    Commands execute only after closing."""
 
     def __init__(self, parent, owner=None):
         super().__init__(parent, owner)
@@ -939,7 +935,7 @@ class PopupMenu(_Popup):
         self.bind("<Right>", lambda e: self._open_child(self.hover))
         self.bind("<Left>", lambda e: self.close() if self.owner else None)
 
-    # tk.Menu-kompatible Befehle
+    # tk.Menu-compatible commands
     def add_command(self, label="", command=None, state="normal", swatch=None, foreground=None, **_):
         self.items.append({"kind": "cmd", "label": label, "command": command, "state": state,
                            "swatch": swatch or foreground})
@@ -963,11 +959,11 @@ class PopupMenu(_Popup):
 
     def close(self):
         super().close()
-        for it in self.items:   # nie geoeffnete Untermenues (verborgene Fenster) mit aufraeumen
+        for it in self.items:   # Also clean up never-opened submenu windows
             if it.get("menu") is not None and it["menu"].winfo_exists():
                 it["menu"].close()
 
-    # Aufbau
+    # Layout
     ROW, SEP, PAD = 30, 9, 6
 
     def _measure(self):
@@ -1070,13 +1066,13 @@ class PopupMenu(_Popup):
 
 
 def menu(parent):
-    """Kontextmenue im Stil der Oberflaeche."""
+    """Styled context menu."""
     return PopupMenu(parent)
 
 
 class SwatchPopup(_Popup):
-    """Farbwahl als Feld farbiger Kaestchen (wie die Palette im Hardware-Feld); darunter der Name
-    der Farbe unter der Maus. names: Farbnamen des Geraets, on_pick(name)."""
+    """Color swatch grid like Hardware palette, with hovered color name below.
+    names contains device color names; on_pick(name)."""
 
     def __init__(self, parent, names, current, on_pick, cols=5):
         super().__init__(parent)
@@ -1131,15 +1127,15 @@ class SwatchPopup(_Popup):
         root.after(1, lambda: self.on_pick(name))
 
 
-# ---------------- Animationen (Ueberblenden) ----------------
-# Tk kann Widgets weder durchscheinend zeichnen noch ueberblenden. Darum: ein Bildschirmfoto des
-# alten Zustands liegt als randloses Fenster genau ueber dem Bereich, darunter wird sofort
-# umgebaut, und das Foto wird ausgeblendet. Das Fenster ist ein "layered window", dessen Inhalt mit
-# UpdateLayeredWindow gesetzt wird - es zeigt das Bild ab dem ersten Moment (ohne auf WM_PAINT zu
-# warten), nimmt keinen Fokus und laesst Klicks durch (WS_EX_TRANSPARENT).
-ANIM = True        # Einstellung "animations" (der Editor setzt sie)
-FADE_MS = 240      # Dauer einer Ueberblendung
-_GHOSTS = []       # laufende Ueberblendungen
+# ---------------- Crossfade animations ----------------
+# Tk cannot render translucent widgets or crossfade them. Cover the old view
+# with a borderless screenshot, rebuild underneath, then fade the screenshot.
+# Use a layered window populated by UpdateLayeredWindow:
+# its image appears immediately without waiting for WM_PAINT,
+# does not take focus, and passes clicks through (WS_EX_TRANSPARENT).
+ANIM = True        # animations preference, set by the editor
+FADE_MS = 240      # Crossfade duration
+_GHOSTS = []       # Active crossfades
 
 
 def ease_out(t):
@@ -1147,13 +1143,13 @@ def ease_out(t):
 
 
 def ease_in_out(t):
-    """Weicher Anfang und weiches Ende (fuer Ueberblendungen: kein harter erster Schritt)."""
+    """Ease-in/ease-out for crossfades without an abrupt first step."""
     t = max(0.0, min(1.0, t))
     return 4 * t * t * t if t < 0.5 else 1 - (-2 * t + 2) ** 3 / 2
 
 
 def _timer_fine(on):
-    """Windows-Zeitgeber auf 1 ms (sonst landet after() auf 15,6-ms-Schritten, die Blende ruckelt)."""
+    """Set Windows timer to 1 ms; 15.6 ms after() steps otherwise make fades stutter."""
     try:
         (ctypes.windll.winmm.timeBeginPeriod if on else ctypes.windll.winmm.timeEndPeriod)(1)
     except Exception:
@@ -1161,8 +1157,8 @@ def _timer_fine(on):
 
 
 def app_in_front(widget):
-    """Liegt ein Fenster dieses Programms vorne und ist das Fenster sichtbar? Nur dann stimmt ein
-    Bildschirmfoto (ImageGrab nimmt, was oben liegt)."""
+    """Is an app window foreground and this window visible? Required for correct
+    ImageGrab screenshots, which capture whichever window is on top."""
     if sys.platform != "win32":
         return False
     try:
@@ -1179,8 +1175,8 @@ def app_in_front(widget):
 
 
 def drop_ghosts():
-    """Laufende Ueberblendungen sofort beenden und warten, bis der Bildschirm sie nicht mehr zeigt
-    (vor einem neuen Bildschirmfoto, sonst steht die halbe alte Blende darin)."""
+    """Finish current fades and wait until gone from screen before taking another
+    screenshot, avoiding a partially faded image in the new capture."""
     if not _GHOSTS:
         return
     for g in _GHOSTS[:]:
@@ -1195,8 +1191,8 @@ _GDI = None
 
 
 def _gdi():
-    """(user32, gdi32, wintypes, BITMAPINFOHEADER) mit Argumenttypen - unter 64 Bit sind Handles
-    Zeiger, ohne argtypes schneidet ctypes sie auf 32 Bit ab."""
+    """(user32,gdi32,wintypes,BITMAPINFOHEADER) with argument types.
+    On 64-bit systems handles are pointers; ctypes truncates without argtypes."""
     global _GDI
     if _GDI is None:
         from ctypes import wintypes
@@ -1237,8 +1233,8 @@ def _gdi():
 
 
 class _Dib:
-    """32-Bit-Bitmap im Speicher (DIB) samt Speicher-DC: Ziel des Bildschirmfotos und Inhalt des
-    Ueberblend-Fensters. with _Dib(w, h) as d: d.mem (DC), d.bits (Pixel BGRX, Zeilen von oben)."""
+    """Memory 32-bit bitmap/DIB and DC: screenshot target and fade-window content.
+    with _Dib(w,h) as d: d.mem is DC; d.bits holds top-down BGRX pixels."""
 
     def __init__(self, w, h):
         u, g, _, BIH = _gdi()
@@ -1254,9 +1250,9 @@ class _Dib:
             raise OSError("CreateDIBSection")
 
     def blt_from(self, widget, sx=0, sy=0):
-        """Den Inhalt von widget hineinkopieren. Gelesen wird aus dem DC des eigenen Fensters (unter DWM
-        dessen Zwischenflaeche): ~3 ms statt ~75 ms fuer ImageGrab bei 1900x1000, und es kommt immer
-        das eigene Fenster, auch wenn ein anderes darueber liegt."""
+        """Copy widget content from its own window DC (DWM intermediate surface).
+        ~3 ms versus ImageGrab ~75 ms at 1900x1000, and captures our window even
+        when another overlaps."""
         u, g, _, _ = _gdi()
         hw = widget.winfo_id()
         src = u.GetDC(hw)
@@ -1292,7 +1288,7 @@ class _Dib:
 
 
 def grab(widget):
-    """Bild eines Widgets (oder Fensters) als RGB-Bild, oder None."""
+    """Widget/window screenshot as RGB image, or None."""
     try:
         widget.update_idletasks()
         w, h = widget.winfo_width(), widget.winfo_height()
@@ -1307,7 +1303,7 @@ def grab(widget):
             except Exception:
                 pass
         elif MAC or os.environ.get("WAYLAND_DISPLAY") or not os.environ.get("DISPLAY"):
-            return None   # macOS fragt fuer Bildschirmfotos nach Freigabe, Wayland liefert keins: Dialoge ohne Unschaerfe
+            return None   # macOS requests screenshot permission; Wayland provides none. Omit dialog blur there.
         from PIL import ImageGrab
         x, y = widget.winfo_rootx(), widget.winfo_rooty()
         return ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True).convert("RGB")
@@ -1316,12 +1312,12 @@ def grab(widget):
 
 
 class _Ghost:
-    """Ein Foto von widget als randloses Fenster genau darueber, das in ms ausgeblendet wird (siehe oben)."""
+    """Borderless screenshot directly over widget, fading over ms; see above."""
 
     def __init__(self, widget, ms, rect=None, fade_in=False, dy=0, settle=True, on_done=None):
-        """rect: (x, y, w, h) in widget statt des ganzen Widgets. fade_in: von unsichtbar einblenden
-        (sonst ausblenden); dy: startet so viele Pixel tiefer und gleitet an seinen Platz. on_done:
-        nach dem letzten Bild (das Fenster bleibt dann noch einen Moment stehen, bis darunter gezeichnet ist)."""
+        """rect=(x,y,w,h) selects part of widget. fade_in starts invisible, otherwise
+        fade out. dy starts lower by that many pixels and slides into place.
+        on_done runs after last frame; window remains briefly until underneath repaints."""
         u, g, wintypes, _ = _gdi()
         self.ms, self.alive, self.start = ms, False, None
         self.fade_in, self.dy, self.on_done = fade_in, dy, on_done
@@ -1335,9 +1331,9 @@ class _Ghost:
         self.win.geometry("%dx%d+%d+%d" % (w, h, x, y))
         self.win.update_idletasks()
         hwnd = u.GetAncestor(self.win.winfo_id(), 2)
-        # WS_EX_LAYERED | TRANSPARENT (Klicks gehen durch) | NOACTIVATE | TOOLWINDOW (keine Taskleiste)
+        # WS_EX_LAYERED | TRANSPARENT (click-through) | NOACTIVATE | TOOLWINDOW (no taskbar)
         u.SetWindowLongW(hwnd, -20, u.GetWindowLongW(hwnd, -20) | 0x80000 | 0x20 | 0x08000000 | 0x80)
-        u.SetWindowLongPtrW(hwnd, -8, _hwnd(top))   # GWLP_HWNDPARENT: Besitzer = Fenster, bleibt darueber
+        u.SetWindowLongPtrW(hwnd, -8, _hwnd(top))   # GWLP_HWNDPARENT: owner window; keep above it
 
         class BLEND(ctypes.Structure):
             _fields_ = [("op", ctypes.c_ubyte), ("flags", ctypes.c_ubyte), ("alpha", ctypes.c_ubyte),
@@ -1356,12 +1352,12 @@ class _Ghost:
         _GHOSTS.append(self)
         _timer_fine(True)
         self.win.bind("<Destroy>", lambda e: self.stop() if e.widget is self.win else None)
-        self.on_start = None       # Rueckruf, sobald die Blende wirklich laeuft (Overlay: Karte gleitet)
+        self.on_start = None       # Callback once fade actually starts, for sliding overlay cards
         self.widget = widget
         self.POINT = wintypes.POINT
-        # Erst ausblenden, wenn darunter fertig umgebaut ist: nach dem laufenden Ereignis (der Aufrufer
-        # baut gerade um) Geometrie und Zeichnen erledigen, dann noch ein Bild Zeit fuer WM_PAINT der
-        # neuen Fenster - sonst laeuft die Blende, waehrend Tk noch rechnet, und ruckelt.
+        # Start fading only once underlying rebuild finishes. After current event,
+        # complete geometry/drawing, then allow one more frame for new windows' WM_PAINT;
+        # otherwise fading competes with Tk computation and stutters.
         if settle:
             self.win.after_idle(self._settle)
         else:
@@ -1399,7 +1395,7 @@ class _Ghost:
             e = ease_in_out(t)
             a = int(255 * (e if self.fade_in else 1 - e))
             pos = None
-            if self.dy:   # gleiten: schnell los, weich ankommen
+            if self.dy:   # Slide: fast start, soft arrival
                 pos = ctypes.byref(self.POINT(self.x, self.y + int(round(self.dy * (1 - ease_out(t)) ** 1.4))))
             ctypes.windll.user32.UpdateLayeredWindow(self.hwnd, None, pos, None, None, None, 0,
                                                      ctypes.byref(self.BLEND(0, 0, a, 0)), 2)
@@ -1412,7 +1408,7 @@ class _Ghost:
         if not cb:
             self.stop()
             return
-        try:   # Endlage voll deckend, dann darunter das Echte zeigen und erst danach verschwinden
+        try:   # End fully opaque, reveal the real underlying content, then remove
             ctypes.windll.user32.UpdateLayeredWindow(self.hwnd, None, ctypes.byref(self.POINT(self.x, self.y)),
                                                      None, None, None, 0, ctypes.byref(self.BLEND(0, 0, 255, 0)), 2)
             cb()
@@ -1424,7 +1420,7 @@ class _Ghost:
         if not self.alive:
             return
         self.alive = False
-        for name in ("on_start", "on_done"):   # abgebrochen: wer darauf wartet, bekommt es trotzdem
+        for name in ("on_start", "on_done"):   # Cancelled: still notify any waiter
             cb = getattr(self, name, None)
             setattr(self, name, None)
             if cb:
@@ -1442,9 +1438,9 @@ class _Ghost:
 
 
 def ghost_fade(widget, ms=None):
-    """Den jetzigen Anblick von widget (Fenster oder Bereich) ueber ihm stehen lassen und in ms
-    ausblenden - der Aufrufer baut darunter gleich um (Seitenwechsel, Dialog zu, Laden fertig).
-    Gibt die Blende zurueck oder None (Animationen aus, Fenster nicht vorne, kein Windows)."""
+    """Keep a screenshot above widget and fade over ms while caller rebuilds below
+    (page switch/dialog close/load completion). Return fade or None if disabled,
+    not foreground, or not Windows."""
     if not ANIM or not app_in_front(widget):
         return None
     try:
@@ -1457,12 +1453,12 @@ def ghost_fade(widget, ms=None):
         return None
 
 
-# ---------------- Overlay (Dialog im Fenster, Hintergrund unscharf) ----------------
-_ROOT = None     # Hauptfenster (setup), Ziel der Meldungen ohne parent
+# ---------------- Overlay dialogs with blurred background ----------------
+_ROOT = None     # Main window from setup; default parent for messages
 
 
 def _backdrop(top, im=None):
-    """Bildschirmfoto des Fensterinhalts, verkleinert, weichgezeichnet und abgedunkelt (oder None)."""
+    """Window screenshot, downscaled, blurred and darkened, or None."""
     if im is None:
         im = grab(top)
     if im is None:
@@ -1474,11 +1470,11 @@ def _backdrop(top, im=None):
 
 
 class Overlay(tk.Canvas):
-    """Dialog als Ebene ueber dem ganzen Fenster: der Fensterinhalt dahinter wird leicht unscharf und
-    dunkler gezeigt, in der Mitte eine abgerundete Karte mit Titel, x und Inhalt in .body.
-    modal: run() wartet auf close(result) und sperrt den Rest. click_out: Klick neben die Karte schliesst."""
+    """Full-window dialog overlay: slightly blurred/darkened background, centered
+    round card with title/x and body content. modal run() waits for close(result)
+    and blocks other controls. click_out closes on outside click."""
 
-    RISE = 16       # Karte gleitet beim Oeffnen um so viele Pixel nach oben ein
+    RISE = 16       # Card upward slide distance on opening
     RISE_MS = 300
     FADE_IN_MS = 260
 
@@ -1513,7 +1509,7 @@ class Overlay(tk.Canvas):
         self.body = tk.Frame(self.card, bg=PANEL)
         self.body.pack(fill="both", expand=True)
         self._win = self.create_window(0, 0, window=self.card, anchor="nw", tags="card")
-        # Oeffnen: der alte Anblick steht als Foto darueber und blendet aus, die Karte gleitet ein
+        # Opening: fade out old screenshot while card slides in
         if self._rise:
             g = ghost_fade(top, ms=self.FADE_IN_MS)
             self._rise_t0 = None
@@ -1567,9 +1563,8 @@ class Overlay(tk.Canvas):
             self.itemconfigure(self._win, height=ch)
 
     def _card_in(self):
-        """Einblenden der Karte: nicht die Karte selbst verschieben (jede Verschiebung zeichnet alle
-        Widgets darin neu, ~25 ms je Bild), sondern ein Bild von ihr (samt Schatten) als eigenes
-        Fenster gleiten und einblenden lassen; die echte Karte ist so lange versteckt."""
+        """Animate a screenshot of the card/shadow in a separate window, keeping the
+        real card hidden. Moving the card itself redraws every child (~25 ms/frame)."""
         try:
             if self._rise:
                 self.move("card", 0, -self._rise)
@@ -1588,7 +1583,7 @@ class Overlay(tk.Canvas):
         self.itemconfigure("card", state="hidden")
 
     def _rise_step(self):
-        """Karte gleitet nach oben an ihren Platz (verschiebt nur die Karten-Elemente)."""
+        """Slide card upward into place, moving only card items."""
         try:
             now = time.perf_counter()
             if self._rise_t0 is None:
@@ -1604,7 +1599,7 @@ class Overlay(tk.Canvas):
             pass
 
     def bind_keys(self, widget=None):
-        """Escape (und Enter, falls on_return gesetzt) auch in Eingabefeldern und Listen der Karte."""
+        """Bind Escape and Enter (if on_return) inside card entries/lists too."""
         for w in (widget or self.card).winfo_children():
             if isinstance(w, (tk.Entry, tk.Listbox)):
                 w.bind("<Escape>", lambda e: self.cancel(), add="+")
@@ -1623,13 +1618,13 @@ class Overlay(tk.Canvas):
         try:
             if not self._closing and self.winfo_ismapped():
                 self._closing = True
-                ghost_fade(self.winfo_toplevel())   # Schliessen: blendet zum Fenster darunter aus
+                ghost_fade(self.winfo_toplevel())   # Closing: fade to the underlying window
             self.destroy()
         except tk.TclError:
             pass
 
     def run(self):
-        """Modal: bis close(); danach das Ergebnis."""
+        """Modal: wait for close(), then return result."""
         prev = self.grab_current()
         self.bind_keys()
         try:
@@ -1647,10 +1642,10 @@ class Overlay(tk.Canvas):
 
 
 class Page(tk.Frame):
-    """Eigene Ansicht an Stelle von Rig-Liste, Signalkette und Parameterfeld (wie der Setlist-Manager):
-    eine Flaeche mit Titel, Inhalt in .body. Dieselbe Schnittstelle wie Overlay (body, card, close,
-    cancel, bind_keys, raise_), damit Dialog-Code als Overlay und als Seite laeuft. Der Editor packt
-    die Seite (Editor.enter_page) und stellt beim Schliessen die Hauptansicht wieder her."""
+    """Dedicated view replacing rig list/chain/parameters, like setlist manager.
+    Titled surface with body. Same interface as Overlay (body/card/close/cancel/
+    bind_keys/raise_), allowing reuse of dialog code. Editor.enter_page packs it
+    and restores main view on close."""
 
     def __init__(self, parent, title=None):
         super().__init__(parent, bg=BG)
@@ -1667,10 +1662,10 @@ class Page(tk.Frame):
         self.body.pack(fill="both", expand=True)
 
     def raise_(self):
-        pass   # liegt schon im Fenster
+        pass   # Already inside the window
 
     def bind_keys(self, widget=None):
-        pass   # Escape schliesst eine Seite nicht (wie im Setlist-Manager)
+        pass   # Escape does not close a page, matching setlist manager
 
     def cancel(self):
         self.close(None)
@@ -1684,10 +1679,9 @@ class Page(tk.Frame):
 
 
 class Loading(tk.Canvas):
-    """Ladehinweis ueber einem Bereich (Seite, Dialog), solange dessen Daten vom Geraet kommen: so
-    geht die Seite sofort auf, statt erst nach dem Lesen. Deckt den Bereich ab und zeigt in der Mitte
-    Ladekreis + Text - erst nach DELAY ms, damit eine schnelle Antwort nicht aufblitzt. done() blendet
-    zum Inhalt ueber, fail(text) zeigt an seiner Stelle den Fehler."""
+    """Loading cover for page/dialog while device data arrives, allowing immediate
+    opening. Spinner/text appear only after DELAY ms to avoid quick-response
+    flashes. done() fades to content; fail(text) displays the error instead."""
 
     FRAMES, TICK, DELAY = 24, 33, 120
 
@@ -1746,7 +1740,7 @@ class Loading(tk.Canvas):
             self._after = None
 
     def fail(self, text):
-        """Statt des Ladekreises einen Fehler zeigen (der Bereich bleibt abgedeckt)."""
+        """Replace spinner with error, keeping area covered."""
         if not self.alive():
             return
         self._stop()
@@ -1755,7 +1749,7 @@ class Loading(tk.Canvas):
         self._draw()
 
     def done(self):
-        """Daten sind da: zum Inhalt darunter ueberblenden und verschwinden."""
+        """Data arrived: fade to underlying content and remove cover."""
         if not self.alive():
             return
         self._stop()
@@ -1769,9 +1763,9 @@ _ICONS = {"info": ("i", ACCENT), "warning": ("!", WARN), "error": ("!", DANGER),
 
 
 def ask(parent, text, buttons, title=None, icon="question", detail=None, cancel=None, width=460):
-    """Meldung/Rueckfrage als Overlay. text: erste Zeile fett, Rest gedaempft; buttons:
-    [(Beschriftung, Wert, Art)] von links nach rechts (Art: ghost/default/primary/danger).
-    Enter = der primary-Knopf, Escape/x = cancel. Gibt den Wert des Knopfes zurueck."""
+    """Message/confirmation overlay. First text line bold, remainder muted.
+    buttons=[(label,value,kind)] left to right; kind ghost/default/primary/danger.
+    Enter selects primary; Escape/x cancels. Return chosen button value."""
     ov = Overlay(parent, title, width=width)
     row = tk.Frame(ov.body, bg=PANEL)
     row.pack(fill="x")
@@ -1802,7 +1796,7 @@ def ask(parent, text, buttons, title=None, icon="question", detail=None, cancel=
 
 
 class _MessageBox:
-    """Ersatz fuer tkinter.messagebox im Stil der Oberflaeche (gleiche Aufrufe)."""
+    """Styled drop-in tkinter.messagebox replacement."""
 
     @staticmethod
     def _title(title):
@@ -1830,7 +1824,7 @@ messagebox = _MessageBox()
 
 
 def spinner_img(dia, colour, frame, frames=24):
-    """Ein Bild des drehenden Ladekreises (frame 0..frames-1): schwache Spur + Bogen."""
+    """Spinner frame 0..frames-1: faint track plus arc."""
     def d(dr, W, H):
         w = max(2, int(W * 0.09))
         box = [w / 2, w / 2, W - 1 - w / 2, H - 1 - w / 2]
@@ -1841,20 +1835,19 @@ def spinner_img(dia, colour, frame, frames=24):
 
 
 class ProgressOverlay(Overlay):
-    """Ladebildschirm fuer laengere Geraeteaktionen (Hochladen, App-Neustart) als Ebene ueber dem
-    Fenster: Ladekreis, Titel, aktueller Schritt, Fortschrittsbalken (step: Anteil 0..1, None =
-    unbestimmt, ein laufender Streifen) und eine Zeile darunter. Solange es laeuft, gibt es weder x
-    noch Escape - die Ebene sperrt den Rest des Fensters. finish() zeigt Erfolg oder Fehler mit OK
-    (auto_close: bei Erfolg nach so vielen ms von selbst zu). reporter(inbox) liefert die
-    Fortschrittsfunktion fuer den Arbeits-Thread."""
+    """Progress overlay for uploads/restarts: spinner/title/current step,
+    progress bar (step fraction 0..1; None shows an indeterminate strip),
+    and subtitle. While active, no x/Escape; block the rest of the window.
+    finish() shows success/error and OK; auto_close delays successful auto-close
+    by milliseconds. reporter(inbox) provides worker-thread progress callback."""
 
     FRAMES, TICK = 24, 33
 
     def __init__(self, parent, title, text="", detail=None, width=460):
         super().__init__(parent, None, width=width, closable=False)
         self.running = True
-        self.shown = 0.0       # angezeigter Anteil, gleitet zum Ziel
-        self.target = None     # None = unbestimmt
+        self.shown = 0.0       # Displayed fraction, eased toward target
+        self.target = None     # None means indeterminate
         self.frame = 0
         self.on_close = None
         self.colour = ACCENT
@@ -1883,7 +1876,7 @@ class ProgressOverlay(Overlay):
         self._tick()
 
     def reporter(self, inbox):
-        """say(text, anteil=None) fuer den Arbeits-Thread - landet ueber inbox auf dem GUI-Thread."""
+        """say(text,fraction=None) for worker thread, dispatched through inbox to GUI."""
         return lambda text, frac=None: inbox.put(lambda: self.step(text, frac))
 
     def alive(self):
@@ -1905,10 +1898,10 @@ class ProgressOverlay(Overlay):
             frac = max(0.0, min(1.0, float(frac)))
             if self.target is None:
                 self.shown = min(self.shown, frac)
-            self.target = max(frac, self.target or 0.0)   # der Balken laeuft nie zurueck
+            self.target = max(frac, self.target or 0.0)   # Progress bar never moves backwards
 
     def finish(self, ok, head, text="", detail=None, auto_close=None, warn=False):
-        """Ergebnis zeigen: ok (gruener Haken; warn = gelbes Ausrufezeichen) oder Fehler (rot)."""
+        """Show success (green check, or yellow warning if warn), or error in red."""
         if not self.alive():
             return
         self.running = False
@@ -1940,7 +1933,7 @@ class ProgressOverlay(Overlay):
         if W < 4:
             return
         rrect(c, 0, 0, W, H, H // 2, CARD)
-        if self.target is None and self.running:   # unbestimmt: Streifen laeuft durch
+        if self.target is None and self.running:   # Indeterminate: moving strip
             sw = max(H, W // 4)
             x = (self.frame * px(6)) % (W + sw) - sw
             x1, x2 = max(0, x), min(W, x + sw)
@@ -1968,7 +1961,7 @@ class ProgressOverlay(Overlay):
         elif self.target is not None and self.shown < self.target:
             self._draw_bar(colour=self.colour)
         else:
-            return   # fertig und Balken steht: nicht weiter zeichnen
+            return   # Finished and bar settled: stop drawing
         self._after = self.after(self.TICK, self._tick)
 
     def cancel(self):
@@ -1989,7 +1982,7 @@ class ProgressOverlay(Overlay):
 
 
 def wrap_words(text, width, max_lines=3):
-    """Text an Wortgrenzen auf Zeilen von hoechstens `width` Zeichen umbrechen."""
+    """Wrap text at word boundaries to at most width characters per line."""
     lines, cur = [], ""
     for w in text.split():
         if not cur:
@@ -2008,7 +2001,7 @@ def wrap_words(text, width, max_lines=3):
 
 
 def text_on(colour):
-    """Dunkle oder helle Schrift fuer eine Flaeche der Farbe '#rrggbb'."""
+    """Dark/light text for a '#rrggbb' background."""
     try:
         r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
     except (TypeError, ValueError):
@@ -2017,7 +2010,7 @@ def text_on(colour):
 
 
 def blend(colour, other, t):
-    """Mischfarbe: Anteil t (0-1) von colour, Rest other (beide '#rrggbb')."""
+    """Blend t fraction of colour with other (both '#rrggbb')."""
     try:
         a = [int(colour[i:i + 2], 16) for i in (1, 3, 5)]
         b = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
@@ -2031,9 +2024,9 @@ def text_size(text, font):
     return f.measure(text), f.metrics("linespace")
 
 
-# ---------------- Einfache Widgets ----------------
+# ---------------- Basic widgets ----------------
 class Panel(tk.Canvas):
-    """Abgerundete Flaeche; Inhalt kommt in .inner (mit seitlichem Rand von r Pixeln)."""
+    """Rounded surface; content in inner, with r-pixel side margins."""
 
     def __init__(self, parent, fill=PANEL, r=10, **kw):
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, **kw)
@@ -2048,9 +2041,9 @@ class Panel(tk.Canvas):
 
 
 class Btn(tk.Canvas):
-    """Abgerundeter Knopf. kind: default (dunkle Karte), primary (Akzent), ghost (nur Text), danger.
-    icon = Name eines icon_img-Symbols: ohne Text quadratisch (so hoch wie mit Text), mit Text
-    steht das Symbol links vor dem Text."""
+    """Rounded button: default dark card, primary accent, ghost text-only, danger.
+    icon names an icon_img icon. Icon-only is square (same height as text buttons);
+    with text, icon precedes it on the left."""
     KINDS = {"default": (CARD, TEXT, CARD_HI, TEXT), "primary": (ACCENT, ACCENT_TXT, ACCENT_HI, ACCENT_TXT),
              "ghost": (None, MUTED, None, TEXT), "danger": (CARD, TEXT, DANGER, TEXT),
              "rec": (DANGER, "#ffffff", "#e8605a", "#ffffff")}
@@ -2125,7 +2118,7 @@ class Btn(tk.Canvas):
             rrect(self, 0, 0, self.w, self.h, self.r, bg)
         if self.icon and self.text:
             n = int(self.h * 0.62)
-            x = (self.w - text_size(self.text, self.font)[0] - n - px(5)) / 2   # Symbol + Text mittig
+            x = (self.w - text_size(self.text, self.font)[0] - n - px(5)) / 2   # Centered icon and text
             self.create_image(x, self.h / 2 - n / 2, anchor="nw", image=icon_img(self.icon, fg, n))
             self.create_text(x + n + px(5), self.h / 2, text=self.text, fill=fg, font=self.font, anchor="w")
         elif self.icon:
@@ -2138,7 +2131,7 @@ class Btn(tk.Canvas):
 
 
 class Badge(tk.Canvas):
-    """Kleine abgerundete Marke mit Text (z. B. 'SCENE MODE' in der Kopfzeile)."""
+    """Small rounded text badge, e.g. SCENE MODE in header."""
 
     def __init__(self, parent, text="", fill=ACCENT, fg=ACCENT_TXT, font=FONT_CARD, padx=10, pady=4, r=6):
         self.fill, self.fg, self.font, self.r = fill, fg, font, px(r)
@@ -2157,7 +2150,7 @@ class Badge(tk.Canvas):
 
 
 class Segmented(tk.Frame):
-    """Umschalter mit 2-3 Feldern (z. B. Current | Fixed). on_pick(index)."""
+    """Two/three-way segmented switch, e.g. Current|Fixed; on_pick(index)."""
 
     def __init__(self, parent, options, current=0, on_pick=None, padx=12):
         super().__init__(parent, bg=parent.cget("bg"))
@@ -2182,7 +2175,7 @@ class Segmented(tk.Frame):
 
 
 class Entry(tk.Canvas):
-    """Abgerundetes Eingabefeld; die wichtigsten Entry-Methoden werden durchgereicht."""
+    """Rounded entry forwarding the main Entry methods."""
 
     def __init__(self, parent, textvariable=None, width=None, placeholder=None, font=FONT, justify="left", r=6):
         self.font, self.r = font, px(r)
@@ -2196,7 +2189,7 @@ class Entry(tk.Canvas):
         super().configure(width=self.w, height=self.h)
         self.bind("<Configure>", self._layout)
         self.placeholder = placeholder
-        if placeholder:   # als Label im Entry, weil Canvas-Fenster immer ueber Canvas-Text liegen
+        if placeholder:   # Use Label within Entry because Canvas windows always sit above Canvas text
             self._ph = tk.Label(self.entry, text=placeholder, bg=CARD, fg=DIM, font=font)
             self._ph.bind("<Button-1>", lambda e: self.entry.focus_set())
         for ev in ("<KeyRelease>", "<FocusIn>", "<FocusOut>"):
@@ -2223,7 +2216,7 @@ class Entry(tk.Canvas):
         else:
             self._ph.place_forget()
 
-    # Durchreichen
+    # Forward methods
     def get(self):
         return self.entry.get()
 
@@ -2249,7 +2242,7 @@ class Entry(tk.Canvas):
 
 
 class Toggle(tk.Canvas):
-    """Kippschalter (An = Akzentfarbe)."""
+    """Toggle switch, accent color when on."""
 
     def __init__(self, parent, value=False, command=None, w=40, h=20, bg=None):
         self.w, self.h = px(w), px(h)
@@ -2281,13 +2274,13 @@ class Toggle(tk.Canvas):
 
 
 class Slider(tk.Canvas):
-    """Regler mit Akzentfuellung. command(wert) beim Ziehen, on_release(wert) beim Loslassen."""
+    """Accent-filled slider; command(value) while dragging, on_release(value) on release."""
 
     def __init__(self, parent, from_=0.0, to=1.0, value=0.0, command=None, on_release=None, height=24, bg=None):
         self.pad = px(9)
         self.knob = px(14)
         self.track = px(4)
-        # width klein anfordern, damit pack/grid die tatsaechliche Breite bestimmen
+        # Request small width so pack/grid determines actual width
         super().__init__(parent, width=px(80), height=px(height), bg=bg or parent.cget("bg"), highlightthickness=0,
                          cursor="hand2")
         self.lo, self.hi = float(from_), float(to)
@@ -2351,9 +2344,9 @@ class Slider(tk.Canvas):
 
 
 class LevelMeter(tk.Canvas):
-    """Pegelanzeige wie auf der Input-/Output-Seite des Geraets: ein Balken je Kanal (names),
-    dB-Skala lo..hi darunter, gruen bis warn, gelb bis clip, rot darueber; Strich = Peak.
-    set([(name, current_db, peak_db)]) mit den Werten des Geraets, set(None) = keine Werte."""
+    """Device-style Input/Output meters: one bar per named channel, lo..hi dB scale;
+    green through warn, yellow through clip, red above; line indicates peak.
+    set([(name,current_db,peak_db)]) applies readings; set(None) clears."""
 
     BAR = 10
     GAP = 6
@@ -2362,7 +2355,7 @@ class LevelMeter(tk.Canvas):
 
     def __init__(self, parent, names, lo, hi, warn=-6.0, clip=0.0, bg=None):
         self.names, self.lo, self.hi, self.warn, self.clip = list(names), float(lo), float(hi), warn, clip
-        self.cur = {n: None for n in self.names}      # geglaettete Anzeige
+        self.cur = {n: None for n in self.names}      # Smoothed display
         self.peak = {n: None for n in self.names}
         h = len(self.names) * (px(self.BAR) + px(self.GAP)) + px(16)
         super().__init__(parent, width=px(80), height=h, bg=bg or parent.cget("bg"), highlightthickness=0)
@@ -2376,9 +2369,9 @@ class LevelMeter(tk.Canvas):
             for name, cur, peak in values:
                 old = self.cur.get(name)
                 if cur is None or old is None or cur >= old:
-                    self.cur[name] = cur                         # steigt sofort
+                    self.cur[name] = cur                         # Rise immediately
                 else:
-                    self.cur[name] = old + (cur - old) * 0.35    # faellt weich
+                    self.cur[name] = old + (cur - old) * 0.35    # Decay smoothly
                 self.peak[name] = peak
         self.redraw()
 
@@ -2403,7 +2396,7 @@ class LevelMeter(tk.Canvas):
             rrect(self, x0, y, x1 - x0, bar, px(2), CARD)
             if cur is not None and cur > self.lo:
                 xe = self._x(cur, x0, x1)
-                # Zonen nacheinander fuellen: gruen .. warn, gelb .. clip, rot
+                # Fill zones in order: green to warn, yellow to clip, then red
                 for a, b, col in ((self.lo, self.warn, ACCENT), (self.warn, self.clip, WARN),
                                   (self.clip, self.hi, DANGER)):
                     xa, xb = self._x(a, x0, x1), min(xe, self._x(b, x0, x1))
@@ -2416,7 +2409,7 @@ class LevelMeter(tk.Canvas):
             self.create_text(w, y + bar / 2, text=txt, anchor="e", font=FONT_SMALL,
                              fill=TEXT if cur is not None and cur > self.lo else DIM)
             y += bar + gap
-        # Skala
+        # Scale
         step = 12 if self.hi - self.lo > 30 else 6
         marks = sorted({self.hi, self.clip, self.warn} | set(
             v for v in range(int(self.lo), int(self.hi) + 1) if v % step == 0))
@@ -2427,7 +2420,7 @@ class LevelMeter(tk.Canvas):
             x = self._x(v, x0, x1)
             self.create_line(x, y - gap + px(1), x, y - gap + px(4), fill=DIM)
             if v % step and v != self.hi and any(0 < abs(x - o) < px(18) for o in placed):
-                continue     # warn/clip-Marke zu nah an einer Skalenzahl: nur Strich
+                continue     # warn/clip marker too close to a scale label: draw line only
             self.create_text(x, y - gap + px(5), text="%+d" % v if v > 0 else "%d" % v, anchor="n",
                              fill=MUTED if v in (self.clip, self.warn) else DIM, font=FONT_TINY)
         peaks = [p for p in self.peak.values() if p is not None and p > self.lo]
@@ -2438,8 +2431,8 @@ class LevelMeter(tk.Canvas):
 
 
 class Dropdown(tk.Canvas):
-    """Auswahlfeld: zeigt den aktuellen Text, Klick oeffnet ein Menue (kurze Listen) oder
-    einen Auswahldialog mit Filter (lange Listen). on_pick(index)."""
+    """Selection field displaying current text. Click opens menu for short lists
+    or filtered picker for long lists. on_pick(index)."""
     MENU_MAX = 28
 
     def __init__(self, parent, values, current="", on_pick=None, width=18, title="Choose", on_open=None,
@@ -2479,7 +2472,7 @@ class Dropdown(tk.Canvas):
         rrect(self, 0, 0, w, h, self.r, CARD, ACCENT if self.hover and self.enabled else LINE, 1)
         fg = TEXT if self.enabled else DIM
         t = self.text
-        while len(t) > 1 and text_size(t, self.font)[0] > w - px(30):   # "…" allein passt evtl. nie (Breite noch 2)
+        while len(t) > 1 and text_size(t, self.font)[0] > w - px(30):   # Even ellipsis alone may not fit when width is still 2
             t = t[:-2] + "…"
         self.create_text(px(9), h / 2, text=t, fill=fg, font=self.font, anchor="w")
         self.create_text(w - px(10), h / 2, text="▾", fill=MUTED if self.enabled else DIM, font=self.font, anchor="e")
@@ -2488,12 +2481,12 @@ class Dropdown(tk.Canvas):
         if not self.enabled:
             return
         if self.on_open:
-            self.on_open()   # liest die Liste nach und ruft ggf. show(values)
+            self.on_open()   # Refresh list and optionally invoke show(values)
             return
         self.show()
 
     def show(self, values=None):
-        """Menue (kurze Liste) oder Auswahldialog mit Filter (lange Liste) zeigen."""
+        """Show short-list menu or filtered long-list picker."""
         if values is not None:
             self.set_values(values)
         if not self.values:
@@ -2515,7 +2508,7 @@ class Dropdown(tk.Canvas):
 
 
 class Card(tk.Canvas):
-    """Abgerundete Karte mit optionaler Ueberschrift und Farbband links; Inhalt in .inner."""
+    """Rounded card with optional heading and left color stripe; content in inner."""
 
     def __init__(self, parent, title=None, colour=None, fill=CARD, padx=12, pady=10, r=8):
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0)
@@ -2547,7 +2540,7 @@ class Card(tk.Canvas):
 
 
 class RailButton(tk.Canvas):
-    """Knopf der linken Symbolleiste: Symbol + kleine Beschriftung."""
+    """Left-sidebar button: icon and small label."""
 
     def __init__(self, parent, kind, text, command=None, w=60, h=58):
         self.w, self.h = px(w), px(h)
@@ -2580,7 +2573,7 @@ class RailButton(tk.Canvas):
 
 
 class RigList(tk.Canvas):
-    """Rig-Liste mit Farbpunkt je Rig. on_pick(index) bei Klick, on_menu(event, index) bei Rechtsklick."""
+    """Rig list with color dots. Click on_pick(index), right-click on_menu(event,index)."""
 
     DRAG_PX = 8
 
@@ -2591,9 +2584,9 @@ class RigList(tk.Canvas):
         self.selected = None
         self.hover = None
         self.on_pick, self.on_menu, self.on_move = on_pick, on_menu, on_move
-        self.can_move = False     # Ziehen erlaubt (Setlist-Reihenfolge)
-        self._press = None        # (zeile, y) beim Druecken
-        self._drag = None         # Ziel-Einfuegeposition waehrend des Ziehens
+        self.can_move = False     # Dragging enabled for setlist ordering
+        self._press = None        # (row,y) on press
+        self._drag = None         # Target insertion position while dragging
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<Button-1>", self._click)
         self.bind("<B1-Motion>", self._drag_motion)
@@ -2617,7 +2610,7 @@ class RigList(tk.Canvas):
         i, y0 = self._press
         if self._drag is None and abs(e.y - y0) < self.DRAG_PX:
             return
-        # Einfuegeposition: vor Zeile k (0..n)
+        # Insertion before row k, 0..n
         k = int((self.canvasy(e.y) + self.row / 2) // self.row)
         self._drag = max(0, min(len(self.items), k))
         self.redraw()
@@ -2633,7 +2626,7 @@ class RigList(tk.Canvas):
                 self.on_pick(i)
             return
         self.redraw()
-        dst = drag - 1 if drag > i else drag   # Zielindex nach dem Herausnehmen von i
+        dst = drag - 1 if drag > i else drag   # Target index after removing i
         if dst != i and self.on_move:
             self.on_move(i, dst)
 
@@ -2690,18 +2683,18 @@ class RigList(tk.Canvas):
         self.configure(scrollregion=(0, 0, w, max(len(self.items) * R, 1)))
 
 
-# Signalwege des MX5 (Chain/Routing): Spalten der Kette, je Spalte ein Platz oder zwei parallele
+# MX5 Chain/Routing: columns with one slot or two parallel slots
 ROUTINGS = {
     "S": ("Serial", [[1], [2], [3], [4], [5], [6], [7], [8], [9], [10], [11]]),
     "SPS-1": ("Serial › Parallel › Serial", [[1], [2], [3], [4, 7], [5, 8], [6, 9], [10], [11]]),
     "PS-1": ("Parallel › Serial", [[1, 5], [2, 6], [3, 7], [4, 8], [9], [10], [11]]),
 }
-ROUTING_ORDER = ["S", "SPS-1", "PS-1"]   # Reihenfolge der Auswahlliste am Geraet
-WIRE = "#34363e"                          # Signalleitung in der Kette
+ROUTING_ORDER = ["S", "SPS-1", "PS-1"]   # Device choice-list order
+WIRE = "#34363e"                          # Chain signal line
 
 
 def _round_path(pts, r):
-    """Polylinie mit abgerundeten Ecken (Viertelkreise, Radius hoechstens r) als Punktliste."""
+    """Polyline point list with rounded quarter-circle corners, radius at most r."""
     import math
     if len(pts) < 3:
         return list(pts)
@@ -2712,9 +2705,9 @@ def _round_path(pts, r):
         if d1 < 1e-6 or d2 < 1e-6:
             continue
         rr = min(r, d1 / 2, d2 / 2)
-        ax, ay = x1 - (x1 - x0) / d1 * rr, y1 - (y1 - y0) / d1 * rr   # Beginn der Rundung
-        bx, by = x1 + (x2 - x1) / d2 * rr, y1 + (y2 - y1) / d2 * rr   # Ende der Rundung
-        for k in range(9):   # quadratische Bezierkurve mit der Ecke als Stuetzpunkt
+        ax, ay = x1 - (x1 - x0) / d1 * rr, y1 - (y1 - y0) / d1 * rr   # Start of curve
+        bx, by = x1 + (x2 - x1) / d2 * rr, y1 + (y2 - y1) / d2 * rr   # End of curve
+        for k in range(9):   # Quadratic Bezier using corner as control point
             t = k / 8
             out.append(((1 - t) ** 2 * ax + 2 * t * (1 - t) * x1 + t * t * bx,
                         (1 - t) ** 2 * ay + 2 * t * (1 - t) * y1 + t * t * by))
@@ -2722,12 +2715,12 @@ def _round_path(pts, r):
     return out
 
 
-_WIRES = {}   # eigener kleiner Zwischenspeicher: die Leitungsbilder sind so gross wie die Kette
+_WIRES = {}   # Small dedicated cache; signal-line images span the chain
 
 
 def wires_img(paths, width, colour, dots=()):
-    """Signalleitungen als ein geglaettetes Bild: paths = [[(x, y), ...]] (bereits gerundet),
-    dots = [(x, y, durchmesser)]. Gibt (bild, x, y) fuer create_image(anchor='nw') zurueck."""
+    """Antialiased signal lines: paths=[[(x,y),...]] already rounded,
+    dots=[(x,y,diameter)]. Return (image,x,y) for create_image(anchor='nw')."""
     pts = [p for path in paths for p in path] + [(x, y) for x, y, _ in dots]
     if not pts or Image is None:
         return None, 0, 0
@@ -2745,7 +2738,7 @@ def wires_img(paths, width, colour, dots=()):
         for path in paths:
             p = [((x - x0) * ss, (y - y0) * ss) for x, y in path]
             dr.line(p, fill=colour, width=lw, joint="curve")
-            for x, y in (p[0], p[-1]):   # runde Enden
+            for x, y in (p[0], p[-1]):   # Round caps
                 dr.ellipse([x - lw / 2, y - lw / 2, x + lw / 2, y + lw / 2], fill=colour)
         for x, y, d in dots:
             x, y, rr = (x - x0) * ss, (y - y0) * ss, d * ss / 2
@@ -2757,8 +2750,8 @@ def wires_img(paths, width, colour, dots=()):
 
 
 def routing_img(name, colour, w, h, block=None):
-    """Kleines Schaltbild eines Signalwegs (Auswahl oben rechts): Kaestchen = Bloecke, Linie =
-    Signal, bei SPS-1/PS-1 zwei parallele Zweige, die sich teilen und wieder zusammenlaufen."""
+    """Small routing diagram: block boxes and signal line; SPS-1/PS-1 show two
+    parallel branches splitting and rejoining."""
     def d(dr, W, H):
         u = H / 22.0
         lw = max(1, int(1.8 * u))
@@ -2769,7 +2762,7 @@ def routing_img(name, colour, w, h, block=None):
         def box(x, y):
             dr.rounded_rectangle([x - bw / 2, y - bh / 2, x + bw / 2, y + bh / 2], radius=1.4 * u, fill=fill)
 
-        def branch(xa, xb, dy):   # Zweig: von der Mitte bei xa nach oben/unten, gerade, zurueck bei xb
+        def branch(xa, xb, dy):   # Branch from center at xa, up/down, straight, back at xb
             pts = _round_path([(xa, cy), (xa + 3 * u, cy), (xa + 3 * u, cy + dy), (xb - 3 * u, cy + dy),
                                (xb - 3 * u, cy), (xb, cy)], 2.4 * u)
             dr.line(pts, fill=colour, width=lw, joint="curve")
@@ -2804,8 +2797,8 @@ def routing_img(name, colour, w, h, block=None):
 
 
 class RoutingPicker(tk.Canvas):
-    """Auswahl des Signalwegs als Segmentleiste mit Schaltbildern (routing_img) statt Text.
-    on_pick(index in ROUTING_ORDER); on_hover(name oder None) fuer eine Beschriftung daneben."""
+    """Segmented routing picker with routing_img diagrams instead of text.
+    on_pick(ROUTING_ORDER index); on_hover(name or None) supplies adjacent label."""
 
     def __init__(self, parent, current=0, on_pick=None, on_hover=None):
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, cursor="hand2")
@@ -2869,48 +2862,45 @@ class RoutingPicker(tk.Canvas):
 
 
 class ChainCanvas(tk.Canvas):
-    """Signalkette: IN, 11 Plaetze, OUT, verbunden durch die Signallinie; parallele Wege
-    (Routing SPS-1 / PS-1) als zwei uebereinander liegende Reihen mit Verzweigung und MIX.
-    Plaetze: Dicts {slot, module, colour, on, sub, double, sub2}; ein doppelter Block (Amp/Cab/IR
-    mit Doubling) zeigt zwei Haelften A und B.
-    Rueckrufe: on_pick(modul, haelfte), on_empty(platz), on_menu(event, modul, platz, haelfte),
-    on_io('Input'|'Output'), on_toggle(modul) bei Doppelklick, on_move(von, nach) nach Ziehen,
-    on_mix() beim Klick auf MIX, on_delete(platz, modul) nach dem Ablegen auf dem Muelleimer
-    (gibt True zurueck, wenn der Block entfernt wird).
-    Ziehen: der Muelleimer erscheint nur waehrend des Ziehens am freien Ende der letzten Reihe;
-    ueber einem Ziel zeigt die Kette schon die Plaetze nach dem Ablegen (plan(kette, von, nach),
-    z. B. live.plan_block_move), die Karten gleiten dorthin (_pos/_tick), ebenso beim Loslassen.
-    Scene-Modus (set_chain(..., scene=True)): jeder belegte Platz traegt d["scene"] =
-    {"mode": 0|1|2, "preset": name} und zeigt statt des Farbbalkens einen Streifen –/AN/AUS
-    und statt der Geraeteklasse den Presetnamen; nur belegte Plaetze sind klickbar, kein
-    Ziehen, kein Einfuegen, Eingang/Ausgang/MIX sind gedimmt.
-    Zuweisungs-Modus (assign=(beschriftung, modul, andere)): wie Scene-Modus bedienbar, der Block
-    'modul' traegt einen Akzentstreifen mit der Beschriftung (z. B. 'FS 1') und einen Rahmen;
-    andere = {modul: 'FS 2'} zeigt Bloecke, die schon ein anderer Schalter bedient (grauer Streifen).
-    In beiden Modi sitzt oben rechts ein runder Knopf mit x (on_exit) zum Verlassen."""
-    MAXC = 7   # Spalten je Reihe
+    """Signal chain: IN, eleven slots, OUT linked by signal lines. SPS-1/PS-1 show
+    parallel rows with split/MIX. Slots={slot,module,colour,on,sub,double,sub2};
+    doubled amp/cab/IR blocks show A/B halves.
+    Callbacks: on_pick(module,half), on_empty(slot), on_menu(event,module,slot,half),
+    on_io(Input|Output), on_toggle(module) on double-click, on_move(src,dst) on drop,
+    on_mix() for MIX, on_delete(slot,module) after trash drop (True removes).
+    Trash appears only during drag at end of final row. Hovering targets previews
+    resulting positions via plan(chain,src,dst), e.g. live.plan_block_move;
+    cards animate there via _pos/_tick, including after release.
+    Scene mode: occupied slots carry scene={mode:0|1|2,preset:name}; unchanged/on/off
+    stripe replaces color bar, preset name replaces device class. Only occupied
+    slots clickable; no drag/insert; Input/Output/MIX dimmed.
+    Assignment mode assign=(label,module,others): same interaction restrictions;
+    selected module gets accent label stripe (e.g. FS 1) and frame. others maps
+    modules to another switch label (e.g. FS 2), shown with gray stripes.
+    Both modes show a round top-right exit x calling on_exit."""
+    MAXC = 7   # Columns per row
 
     def __init__(self, parent, on_pick=None, on_empty=None, on_menu=None, on_io=None, on_toggle=None, on_move=None,
                  on_mix=None, on_exit=None, on_delete=None, plan=None, on_double=None, on_connect=None):
         super().__init__(parent, bg=BG, highlightthickness=0)
         self.on_double, self.on_connect = on_double, on_connect
-        self.connect = None      # ohne Kette: 'idle' = Knopf 'Connect to Device', 'busy' = verbindet gerade
-        self.connect_err = None  # Text unter dem Knopf (letzter Verbindungsversuch)
+        self.connect = None      # No chain: idle shows Connect to Device; busy means connecting
+        self.connect_err = None  # Hint below button from last connection attempt
         self.connect_box = None
-        self.double_box = None   # Knopf '2x' ueber dem gewaehlten Amp/Cab/IR: (x1, y1, x2, y2, modul)
+        self.double_box = None   # 2x button above selected amp/cab/IR: (x1,y1,x2,y2,module)
         self.on_pick, self.on_empty, self.on_menu, self.on_io = on_pick, on_empty, on_menu, on_io
         self.on_toggle, self.on_move, self.on_mix, self.on_exit = on_toggle, on_move, on_mix, on_exit
         self.on_delete, self.plan = on_delete, plan
-        self._pos = {}           # Modul -> gezeichnete Position (x, y) links oben, gleitet zu _targets
+        self._pos = {}           # Module -> rendered top-left (x,y), animating toward _targets
         self._targets = {}
-        self._after = None       # laufende Animation
-        self._keep_until = 0     # bis dahin behaelt set_chain die Positionen (Animation nach dem Ablegen)
-        self.fly = None          # Karte, die in den Muelleimer fliegt
-        self.hidden = None       # (modul, bis) nicht zeichnen (liegt im Muelleimer)
-        self.trash_box = None    # (cx, cy, r) waehrend des Ziehens
-        self._trash_k = 0.0      # Einblenden des Muelleimers 0..1
-        self.exit_box = None     # Schliessen-Knopf im Scene-/Zuweisungs-Modus
-        self.k = 1.0                           # Vergroesserung je nach Platz (_fit), 0.6-2.4
+        self._after = None       # Animation active
+        self._keep_until = 0     # Until then, set_chain preserves positions for post-drop animation
+        self.fly = None          # Card flying into trash
+        self.hidden = None       # (module,until): do not draw while inside trash
+        self.trash_box = None    # (cx,cy,r) while dragging
+        self._trash_k = 0.0      # Trash fade-in 0..1
+        self.exit_box = None     # Scene/assignment close button
+        self.k = 1.0                           # Available-space scale from _fit, 0.6-2.4
         self._scale(1.0)
         self.slots = []
         self.selected = (None, None)
@@ -2918,14 +2908,14 @@ class ChainCanvas(tk.Canvas):
         self.live = False
         self.hover = (None, None)
         self.hint = ""
-        self.press = None        # (key, x, y) beim Druecken
-        self.drag = None         # Platz, der gezogen wird
-        self.drop = None         # Zielplatz unter der Maus
+        self.press = None        # (key,x,y) on press
+        self.drag = None         # Dragged slot
+        self.drop = None         # Target slot under pointer
         self.mouse = (0, 0)
         self.mix_box = None
         self.scene = False
-        self.assign = None       # (beschriftung, modul) im Zuweisungs-Modus
-        self.pick_only = False   # Scene-/Zuweisungs-Modus: nur belegte Plaetze klickbar, kein Ziehen
+        self.assign = None       # (label,module) in assignment mode
+        self.pick_only = False   # Scene/assignment: only occupied slots clickable, no dragging
         self.bind("<Configure>", lambda e: (self._pos.clear(), self.redraw()))
         self.bind("<Motion>", self._motion)
         self.bind("<Leave>", lambda e: self._set_hover(None))
@@ -2944,7 +2934,7 @@ class ChainCanvas(tk.Canvas):
         self.selected = selected if isinstance(selected, tuple) else (selected, None)
         self.routing = routing if routing in ROUTINGS else "S"
         self.drag = self.drop = self.press = None
-        if time.monotonic() > self._keep_until:   # sonst gleiten die Karten von der Ablegestelle weiter
+        if time.monotonic() > self._keep_until:   # Otherwise cards continue sliding from drop positions
             self._pos.clear()
         if self.hidden and not any(d["module"] == self.hidden[0] for d in self.slots):
             self.hidden = None
@@ -2952,7 +2942,7 @@ class ChainCanvas(tk.Canvas):
 
     # ---- Layout ----
     def _display(self):
-        """Plaetze, wie sie nach dem Ablegen stuenden (Vorschau beim Ziehen), sonst wie sie sind."""
+        """Slots in drop-preview order while dragging, otherwise actual slots."""
         if self.drag is None or not isinstance(self.drop, int) or self.drop == self.drag or self.plan is None:
             return self.slots
         chain = [d if d["module"] else None for d in self.slots]
@@ -2961,30 +2951,29 @@ class ChainCanvas(tk.Canvas):
                 for k, d in enumerate(self.plan(chain, self.drag, self.drop))]
 
     def _rows(self):
-        """Reihen aus Spalten: [[['Input'], [1], [4, 7], ...], ...]"""
+        """Rows of columns: [[['Input'], [1], [4,7], ...], ...]."""
         cols = [["Input"]] + [list(c) for c in ROUTINGS[self.routing][1] if all(k <= len(self.slots) for k in c)] + [["Output"]]
         return [cols[i:i + self.MAXC] for i in range(0, len(cols), self.MAXC)]
 
     def p(self, n):
-        """Pixel, mit dem Platzfaktor k skaliert."""
+        """Pixels scaled by available-space factor k."""
         return px(n * self.k)
 
     def _scale(self, k):
-        """Alle Masse und Schriften fuer den Faktor k setzen (Grundmasse: Karte 76 x 92)."""
+        """Set all dimensions/fonts for k; base card size 76 x 92."""
         self.k = k
         self.CW, self.CH, self.GAP, self.GY, self.RG = self.p(76), self.p(92), self.p(14), self.p(22), self.p(44)
-        self.XG = self.p(18)                           # Zusatzabstand vor/nach parallelen Zweigen
-        self.IOW, self.IOH = self.p(46), self.p(60)   # Eingang/Ausgang: kleiner, mittig auf der Signallinie
-        self.EW = self.p(58)                           # leerer Platz: schlankeres Kaestchen
+        self.XG = self.p(18)                           # Extra spacing before/after parallel branches
+        self.IOW, self.IOH = self.p(46), self.p(60)   # Input/output: smaller, centered on signal line
+        self.EW = self.p(58)                           # Empty slot: narrower box
         self.f_tiny = (SANS, max(7, int(round(7 * k))))
         self.f_card = (SANS, max(8, int(round(8 * k))), "bold")
         self.f_plus = (SANS, max(12, int(round(16 * k))))
 
     @staticmethod
     def _col_xs(cols, cw, gap, xg):
-        """x der Spalten einer Reihe (ab 0): vor und nach einer parallelen Gruppe xg mehr Abstand,
-        damit Verzweigung und Mischpunkt Platz haben. Dazu die Breite samt Platz nach einer
-        Gruppe am Reihenende."""
+        """Column x positions, zero-based. Extra xg around parallel groups provides
+        room for split/mix points. Include trailing group spacing in row width."""
         xs, x = [], 0
         for c, col in enumerate(cols):
             if c > 0 and (len(col) > 1) != (len(cols[c - 1]) > 1):
@@ -2994,8 +2983,8 @@ class ChainCanvas(tk.Canvas):
         return xs, x - gap + (xg if len(cols[-1]) > 1 else 0)
 
     def _fit(self):
-        """Faktor k so waehlen, dass die Kette die Flaeche ausfuellt (in Zehnteln, 0,6 bis 2,4,
-        damit die Symbol-Zwischenspeicher nicht mit Zwischengroessen volllaufen)."""
+        """Choose k to fill area in tenths, 0.6..2.4, avoiding many intermediate
+        icon sizes overflowing image caches."""
         w, h = self.winfo_width(), self.winfo_height()
         if w < 50 or not self.slots:
             return
@@ -3011,9 +3000,9 @@ class ChainCanvas(tk.Canvas):
             self._scale(k)
 
     def _layout(self, slots=None):
-        """Positionen: boxes {key: (x, y)}, rows [(y_top, height, cols, xs)]; slots = anzuzeigende
-        Plaetze (Vorschau), sonst die echten. In Reihen mit parallelen Wegen liegen die seriellen
-        Bloecke auf der Mittelachse, die beiden Zweige darueber und darunter."""
+        """Positions: boxes={key:(x,y)}, rows=[(y_top,height,cols,xs)]. slots is preview
+        or actual chain. In parallel rows, serial blocks sit on center axis;
+        branches above and below."""
         self._fit()
         w, h = self.winfo_width(), self.winfo_height()
         rows = self._rows()
@@ -3045,7 +3034,7 @@ class ChainCanvas(tk.Canvas):
         return self.CW, self.CH
 
     def _hit(self, x, y):
-        """(key, haelfte) unter der Maus; key = 'Input'/'Output'/platz/'Mix'/'Double'/'Connect' oder None."""
+        """(key,half) under pointer; key Input/Output/slot/Mix/Double/Connect, or None."""
         if not self.slots:
             b = self.connect_box
             return ("Connect", None) if b and b[0] <= x <= b[2] and b[1] <= y <= b[3] else (None, None)
@@ -3058,7 +3047,7 @@ class ChainCanvas(tk.Canvas):
             if bx <= x <= bx + bw and by <= y <= by + bh:
                 d = self._slot(key)
                 if self.pick_only and (d is None or d["module"] is None):
-                    return None, None   # Scene: nur belegte Plaetze
+                    return None, None   # Scene: occupied slots only
                 half = None
                 if d and d["module"] and d["double"] and not self.pick_only:
                     half = "A" if y < by + self.CH / 2 else "B"
@@ -3076,7 +3065,7 @@ class ChainCanvas(tk.Canvas):
     def _slot(self, key):
         return self.slots[key - 1] if isinstance(key, int) else None
 
-    # ---- Maus ----
+    # ---- Mouse ----
     def _motion(self, e):
         self._set_hover(self._hit(e.x, e.y))
 
@@ -3120,7 +3109,7 @@ class ChainCanvas(tk.Canvas):
         else:
             target, _ = self._hit(e.x, e.y)
             drop = target if isinstance(target, int) else None
-        if drop == self.drop:   # nur die gezogene Karte mitfuehren, nicht alles neu zeichnen
+        if drop == self.drop:   # Move only the dragged card, without redrawing everything
             self.move("ghost", e.x - self.mouse[0], e.y - self.mouse[1])
             self.mouse = (e.x, e.y)
             return
@@ -3140,14 +3129,14 @@ class ChainCanvas(tk.Canvas):
             self.drag = self.drop = self.press = None
             self.configure(cursor="hand2" if key is not None else "")
             self._keep_until = time.monotonic() + 1.0
-            if dst == "Trash":   # Karte fliegt in den Muelleimer, danach fragt on_delete nach
-                self.drag, self.drop = src, "Trash"   # Muelleimer bleibt sichtbar, bis sie angekommen ist
+            if dst == "Trash":   # Card flies into trash, then on_delete asks for confirmation
+                self.drag, self.drop = src, "Trash"   # Keep trash visible until card arrives
                 self.hidden = (d["module"], time.monotonic() + 10)
                 self.fly = {"d": d, "slot": src, "x": mx, "y": my, "s": 0.6}
                 self.redraw()
                 return
-            # die Karte gleitet von der Maus an ihren Platz: den neuen (on_move -> set_chain) oder
-            # zurueck, falls nichts verschoben wird; die anderen gleiten aus der Vorschau weiter
+            # Card slides from pointer to new position (on_move -> set_chain), or back
+            # if unchanged; other cards continue from preview positions
             self._pos[d["module"]] = ghost
             self.redraw()
             if dst is not None and dst != src:
@@ -3194,14 +3183,14 @@ class ChainCanvas(tk.Canvas):
             d = self._slot(key)
             self.on_menu(e, d["module"], d["slot"], half)
 
-    # ---- Zeichnen ----
+    # ---- Drawing ----
     def _card(self, x, y, d, hovered, ghost=False):
-        """Block als grosses Modell-Symbol ohne Rahmen: duenner Farbbalken darueber, Platznummer
-        (oder AUS) darunter; Auswahl = Akzentrahmen, Maus darueber = leichte Flaeche.
-        Doppelte Bloecke: zwei Symbole A/B untereinander."""
+        """Block as large frameless icon: thin color stripe above, slot number/OFF below;
+        accent frame when selected, subtle surface when hovered. Doubled blocks
+        show A/B icons vertically."""
         cw, ch = self.CW, self.CH
         module, colour, on, sub = d["module"], d["colour"], d["on"], d["sub"]
-        icon = d.get("icon") or module   # eigenes Symbol (NAM im Anxiety OD)
+        icon = d.get("icon") or module   # Custom icon for NAM in Anxiety OD
         sel_mod, sel_half = self.selected
         band = DIM if on is False else (colour or DIM)
         dim = on is False
@@ -3222,7 +3211,7 @@ class ChainCanvas(tk.Canvas):
                 return
             if hovered:
                 rrect(self, x, y, cw, ch, self.p(8), CARD)
-            if module in (others or {}):   # von einem anderen Schalter bedient: grauer Streifen
+            if module in (others or {}):   # Controlled by another switch: gray stripe
                 sh = self.p(13)
                 rrect(self, x + self.p(6), y + self.p(3), cw - self.p(12), sh, self.p(4), CARD_HI)
                 self.create_text(x + cw / 2, y + self.p(3) + sh / 2, text=others[module], fill=MUTED, font=self.f_tiny)
@@ -3258,11 +3247,11 @@ class ChainCanvas(tk.Canvas):
         self.create_text(x + cw / 2, y + ch - self.p(3), text=foot, fill=foot_fg, font=self.f_tiny, anchor="s")
 
     def _scene_card(self, x, y, d, hovered):
-        """Platz im Scene-Modus: Streifen mit –/AN/AUS (Farbe des Blocks, Akzent, Rot), Symbol im
-        Zustand nach dem Schalten, darunter der Presetname (leer = Klasse, gedimmt)."""
+        """Scene slot: unchanged/on/off stripe (block/accent/red color), post-switch
+        icon state, preset name below (empty shows dimmed class)."""
         cw, ch = self.CW, self.CH
         module, colour, on, sub = d["module"], d["colour"], d["on"], d["sub"]
-        icon = d.get("icon") or module   # eigenes Symbol (NAM im Anxiety OD)
+        icon = d.get("icon") or module   # Custom icon for NAM in Anxiety OD
         sc = d.get("scene") or {"mode": 0, "preset": ""}
         mode, preset = sc.get("mode", 0), sc.get("preset", "")
         sel = module == self.selected[0]
@@ -3296,7 +3285,7 @@ class ChainCanvas(tk.Canvas):
         if self.pick_only and self.winfo_width() >= 50:
             W = self.winfo_width()
             rrect(self, self.p(1), self.p(1), W - self.p(2), self.winfo_height() - self.p(2), self.p(10), "", ACCENT, 1)
-            # runder Schliessen-Knopf oben rechts (geglaettet gerendert)
+            # Antialiased round top-right close button
             r = px(14)
             cx, cy = W - px(12) - r, px(12) + r
             hov = self.hover[0] == "Exit"
@@ -3312,9 +3301,9 @@ class ChainCanvas(tk.Canvas):
         disp = self._display()
         boxes, rows, x0 = self._layout(disp)
         cw, ch = self.CW, self.CH
-        # Signalleitungen als ein geglaettetes Bild: Achse je Reihe, parallele Gruppen als Klammer
-        # (Verzweigungspunkt links, beide Zweige ueber/unter der Achse, Mischpunkt rechts), dazu
-        # die Schleife zur naechsten Reihe; alle Ecken gerundet
+        # Signal lines as one antialiased image: row axes and parallel brackets,
+        # splitting at left, branches above/below axis, mixing at right;
+        # plus next-row loop, all corners rounded
         paths, dots, merges = [], [], []
         R = self.p(16)
         xl = x0 - self.p(18)
@@ -3344,7 +3333,7 @@ class ChainCanvas(tk.Canvas):
                 merges.append((mx, my))
                 start = mx
                 c = c2 + 1
-            if r + 1 < len(rows):   # Schleife zur naechsten Reihe (rechts am Mischpunkt vorbei)
+            if r + 1 < len(rows):   # Loop to next row, passing right of mix point
                 nytop, nh, ncols, _ = rows[r + 1]
                 ny = nytop + nh / 2
                 ymid = (ytop + height + nytop) / 2
@@ -3360,17 +3349,17 @@ class ChainCanvas(tk.Canvas):
         else:
             for p in paths:
                 self.create_line(*[v for pt in p for v in pt], fill=WIRE, width=self.p(4))
-        for mx, my in merges:   # Mischpunkt: Klick oeffnet die Mischung der Zweige
+        for mx, my in merges:   # Mix point: click opens branch mixing
             d = self.p(26)
             hov = self.hover[0] == "Mix" and not self.pick_only
-            sel = self.selected[0] == "Chain" and not self.pick_only   # Mischung im Parameterfeld (MIX)
+            sel = self.selected[0] == "Chain" and not self.pick_only   # Mix in parameter panel (MIX)
             circle(self, mx, my, d, ACCENT if hov else (CARD_LO if self.pick_only else CARD_HI),
                    ACCENT if hov or sel else WIRE, 2)
             n = self.p(18)
             self.create_image(int(mx - n / 2), int(my - n / 2), anchor="nw",
                               image=icon_img("mix", ACCENT_TXT if hov else (DIM if self.pick_only else TEXT), n))
             self.mix_box = (mx - d / 2, my - d / 2, mx + d / 2, my + d / 2)
-        # Kaestchen: Eingang/Ausgang und leere Plaetze fest, Bloecke gesammelt und danach gezeichnet
+        # Draw fixed input/output/empty boxes, then collected blocks
         hidden = self.hidden[0] if self.hidden and time.monotonic() < self.hidden[1] else None
         dragged = self._slot(self.drag)["module"] if isinstance(self.drag, int) else None
         preview = disp is not self.slots
@@ -3393,10 +3382,10 @@ class ChainCanvas(tk.Canvas):
             m = d["module"]
             bw = self._size(key, disp)[0]
             if m is not None and m == dragged and not self.fly:
-                if preview:   # Landeplatz der gezogenen Karte: gedimmt mit Akzentrahmen
+                if preview:   # Dragged card landing position: dimmed with accent frame
                     rrect(self, x - self.p(3), y - self.p(3), cw + self.p(6), ch + self.p(6), self.p(10), "", ACCENT, 2)
                     self._card(x, y, dict(d, on=False), False)
-                else:         # Quelle beim Ziehen: nur ein Schatten
+                else:         # Drag source: shadow only
                     rrect(self, x, y, cw, ch, self.p(8), CARD_LO, LINE, 1)
                 continue
             if self.drop == key and self.drag is not None and not preview:
@@ -3410,7 +3399,7 @@ class ChainCanvas(tk.Canvas):
                 continue
             targets[m] = (x, y)
             cards.append((d, hovered))
-        # Bloecke an ihrer (gleitenden) Position; die noch unterwegs sind, liegen obenauf
+        # Blocks at animated positions, moving cards drawn on top
         self._pos = {m: p for m, p in self._pos.items() if m in targets}
         self._targets = targets
         cards.sort(key=lambda c: self._pos.get(c[0]["module"], targets[c[0]["module"]]) != targets[c[0]["module"]])
@@ -3420,12 +3409,12 @@ class ChainCanvas(tk.Canvas):
             if d["module"] == self.selected[0] and d.get("can_double") and not self.pick_only \
                     and self.drag is None and not self.fly and self.on_double:
                 self._double_btn(x, y, d)
-        # Muelleimer: nur waehrend des Ziehens, am freien Ende der letzten Reihe (hinter OUT);
-        # liegt ueber der gezogenen/fliegenden Karte, damit sie darin verschwindet
+        # Trash only while dragging, after OUT on final row;
+        # above dragged/flying card so it disappears inside
         show_trash = self.on_delete is not None and (self.drag is not None or self.fly is not None)
-        if self.fly:   # Karte auf dem Weg in den Muelleimer, schrumpft dabei
+        if self.fly:   # Card shrinks while flying into trash
             self._mini(self.fly["d"], self.fly["x"], self.fly["y"], self.fly["s"])
-        elif self.drag is not None:    # gezogene Karte unter der Maus (Tag "ghost" fuer _drag_motion)
+        elif self.drag is not None:    # Dragged card at pointer, ghost tag for _drag_motion
             self.addtag_all("fixed")
             mx, my = self.mouse
             if self.drop == "Trash":
@@ -3444,7 +3433,7 @@ class ChainCanvas(tk.Canvas):
             else:
                 cx, cy = self.winfo_width() - self.p(44), self.winfo_height() - self.p(44)
             hot = self.drop == "Trash"
-            k = 1 - (1 - self._trash_k) ** 2   # Einblenden: wachsen, abgebremst
+            k = 1 - (1 - self._trash_k) ** 2   # Fade-in: eased growth
             r = self.p(26) * (0.5 + 0.5 * k) * (1.15 if hot else 1.0)
             circle(self, cx, cy, 2 * r, DANGER if hot else CARD, DANGER if hot else LINE, 1)
             size = max(8, int(r * 1.1))
@@ -3461,7 +3450,7 @@ class ChainCanvas(tk.Canvas):
             self._after = self.after(15, self._tick)
 
     def _double_btn(self, x, y, d):
-        """Knopf '2x' mittig ueber der Karte: Doppelung (zwei Amps/Cabs/IRs) an/aus."""
+        """Centered 2x button above card toggles amp/cab/IR doubling."""
         on = bool(d.get("double"))
         bw, bh = self.p(34), self.p(17)
         cx, top = x + self.CW / 2, max(self.p(1), y - bh + self.p(3))
@@ -3473,8 +3462,8 @@ class ChainCanvas(tk.Canvas):
         self.double_box = (cx - bw / 2, top, cx + bw / 2, top + bh, d["module"])
 
     def _draw_empty(self):
-        """Keine Kette: Hinweis und, solange nicht verbunden, der Knopf 'Connect to Device'
-        (self.connect = 'idle' | 'busy' | None, darunter ggf. self.connect_err)."""
+        """No chain: hint and Connect to Device while disconnected.
+        self.connect=idle|busy|None, optional connect_err below."""
         W, H = self.winfo_width(), self.winfo_height()
         if W < 50:
             return
@@ -3503,8 +3492,8 @@ class ChainCanvas(tk.Canvas):
                              width=px(520), justify="center", anchor="n")
 
     def _mini(self, d, cx, cy, s):
-        """Nur das Modell-Symbol, auf s verkleinert, mittig bei (cx, cy) (Weg in den Muelleimer);
-        Groessen in 4-px-Stufen, damit der Bild-Zwischenspeicher klein bleibt."""
+        """Model icon only, scaled by s around cx,cy for trash animation;
+        quantize sizes to 4 px to keep cache small."""
         iw = max(8, int((self.CW - self.p(4)) * s / 4) * 4)
         ih = max(8, int((self.CH - self.p(26)) * s / 4) * 4)
         self.create_image(int(cx - iw / 2), int(cy - ih / 2), anchor="nw",
@@ -3512,8 +3501,8 @@ class ChainCanvas(tk.Canvas):
 
     # ---- Animation ----
     def _tick(self):
-        """Ein Schritt: jede Karte ein Stueck (30 %) naeher an ihren Platz, Muelleimer einblenden,
-        fliegende Karte Richtung Muelleimer; ~15 ms je Schritt, gut 0,15 s bis zum Ziel."""
+        """Animation tick: cards move 30% toward targets, trash fades in, flying card
+        approaches trash; ~15 ms per tick, ~0.15 s total."""
         self._after = None
         a = 0.3
         for m, (tx, ty) in self._targets.items():
@@ -3533,7 +3522,7 @@ class ChainCanvas(tk.Canvas):
         self.redraw()
 
     def _fly_done(self):
-        """Karte ist im Muelleimer: on_delete fragt nach; abgebrochen = sie gleitet zurueck."""
+        """Card reached trash: on_delete confirms; if cancelled, slide back."""
         f, self.fly = self.fly, None
         m, tb = f["d"]["module"], self.trash_box
         self.drag = self.drop = None
@@ -3543,7 +3532,7 @@ class ChainCanvas(tk.Canvas):
             ok = self.on_delete(f["slot"], m)
         finally:
             if ok and any(d["module"] == m for d in self.slots):
-                self.hidden = (m, time.monotonic() + 3)   # bis die Kette ohne ihn neu gesetzt wird
+                self.hidden = (m, time.monotonic() + 3)   # Until chain is reset without this block
             elif not ok:
                 self.hidden = None
                 if tb and any(d["module"] == m for d in self.slots):
@@ -3551,9 +3540,9 @@ class ChainCanvas(tk.Canvas):
                 self.redraw()
 
 
-# ---------------- Dialoge ----------------
+# ---------------- Dialogs ----------------
 class OverlayDialog(Overlay):
-    """Grundlage der modalen Dialoge als Overlay (Inhalt in .body, Ergebnis in .result, run())."""
+    """Modal overlay base: body content, result, run()."""
 
     def __init__(self, parent, title, width=None, height=None):
         super().__init__(parent, title, width=width, height=height)
@@ -3566,7 +3555,7 @@ class OverlayDialog(Overlay):
 
 
 class ChoiceDialog(OverlayDialog):
-    """Auswahl aus einer langen Liste mit Filterfeld."""
+    """Filtered selection from a long list."""
 
     def __init__(self, parent, title, values, current=None):
         super().__init__(parent, title, width=440)
@@ -3616,7 +3605,7 @@ class ChoiceDialog(OverlayDialog):
 
 
 class TextDialog(OverlayDialog):
-    """Eine Zeile Text abfragen (Name, Programmnummer). result = Text oder None."""
+    """Prompt for one text line (name/program number); result is text or None."""
 
     def __init__(self, parent, title, label, initial="", hint=None, ok="Apply", width=36):
         super().__init__(parent, title, width=440)
@@ -3640,7 +3629,7 @@ class TextDialog(OverlayDialog):
         self.close(self.var.get())
 
 
-# Kategorien der Modell-Auswahl (wie im Web-Editor); Blocknamen ohne die Endung " 2"
+# Model-picker categories as in web editor; block names omit instance suffix ' 2'
 CATEGORIES = [
     ("Amp", ["Amp"]),
     ("Cab/IR", ["Cab", "IR", "IR (1024)"]),
@@ -3663,7 +3652,7 @@ CATEGORIES = [
     ("Volume/Dynamics", ["Volume", "Noise Filter", "Gate", "Auto Swell"]),
     ("Tools", ["Acoust Sim", "FX-Loop"]),
 ]
-# Bloecke, deren Modelle in der Auswahl als eigene Karten erscheinen: Block -> (Parameter, Art)
+# Blocks with individual model cards: block -> (parameter,kind)
 MODEL_PARAM = {"Amp": ("Type", "amp"), "Cab": ("CabType", "cab"), "IR": ("IR", "cab"), "IR (1024)": ("IR", "cab")}
 
 
@@ -3679,8 +3668,8 @@ def category_of(name):
 
 
 def class_label(name):
-    """Kurze Geraeteklasse unter der Karte in der Signalkette ('Amp', 'Reverb', 'EQ', ...);
-    bei Sammelkategorien entscheidet der Blockname (Phaser/Flanger, Wah/Filter, ...)."""
+    """Short chain-card device class (Amp/Reverb/EQ/etc.); combined categories use
+    block name to distinguish Phaser/Flanger, Wah/Filter, etc."""
     base = base_name(name or "")
     cat = category_of(base)
     n = base.lower()
@@ -3704,9 +3693,8 @@ def class_label(name):
 
 
 def warm_model_icons(widget, names=None, models=None, nam=True):
-    """Karten-Symbole der Blockauswahl im Leerlauf vorzeichnen (je Happen ein paar, die Oberflaeche
-    bleibt bedienbar), damit sie beim ersten Oeffnen schon im Cache liegen. names: Blocktypen
-    (Standard: alle aus CATEGORIES), models: {Block: [Modelle]} fuer Amp/Cab."""
+    """Prewarm picker icons in small idle batches, keeping UI responsive.
+    names defaults to CATEGORIES block types; models={block:[models]} for amp/cab."""
     todo = [("NAM", None)] if nam else []
     for b in sorted(set(base_name(n) for n in (names or [n for _, ns in CATEGORIES for n in ns]))):
         todo += [(b, m) for m in (models or {}).get(b) or [None]]
@@ -3728,12 +3716,11 @@ def warm_model_icons(widget, names=None, models=None, nam=True):
 
 
 class ModelSelector(OverlayDialog):
-    """Modell-Auswahl wie im Web-Editor: Kategorien links, Karten in der Mitte, Presets des
-    gewaehlten Blocktyps rechts. names: Blocktypen des Geraets; models: {Block: [Modellnamen]}
-    fuer Amp/Cab. nam: {Basisname: Anzeigename} der Bloecke, die die NAM-Mod spielt - sie erscheinen
-    unter diesem Namen mit NAM-Symbol in der Kategorie Amp. Ergebnis: (Basisname, Modell oder None,
-    Preset-Dict oder None)."""
-    ICON = (90, 63)   # Kartensymbol (logische px), auch fuer warm_model_icons
+    """Web-style picker: categories left, cards center, selected type presets right.
+    names: device block types; models={block:[model_names]} for amp/cab.
+    nam={base_name:display_name} maps NAM types to custom icons/names in Amp.
+    Return (base_name,model_or_None,preset_dict_or_None)."""
+    ICON = (90, 63)   # Card icon size in logical pixels, shared with warm_model_icons
 
     def __init__(self, parent, title, names, current=None, models=None, current_model=None, presets=None, nam=None):
         super().__init__(parent, title, 1140, 620)
@@ -3742,15 +3729,15 @@ class ModelSelector(OverlayDialog):
         self.CARD_W, self.CARD_H, self.PAD = px(112), px(124), px(10)
         self.models = models or {}
         self.nam = nam or {}
-        # presets: Funktion(basisname) -> [{name, ...}] oder None (ohne Presets); gewaehltes Preset
-        # kommt als drittes Element des Ergebnisses zurueck
+        # presets(base_name) -> [{name,...}] or None; chosen preset is returned
+        # as the third result element
         self.presets = presets
         self.preset = None
         self.preset_items = []
-        # Eintraege: (Anzeigename, Basisblock, Modell)
+        # Entries: (display_name,base_block,model)
         self.items = []
         for b in sorted(set(base_name(n) for n in names), key=str.lower):
-            if b in self.nam:   # NAM vorn: in "Amp" vor den 53 Amp-Modellen, sonst muesste man scrollen
+            if b in self.nam:   # Put NAM first, ahead of 53 amp models, avoiding scrolling
                 self.items.insert(sum(1 for it in self.items if it[1] in self.nam), (self.nam[b], b, None))
             elif self.models.get(b):
                 for m in self.models[b]:
@@ -3836,7 +3823,7 @@ class ModelSelector(OverlayDialog):
 
     def fill(self):
         g = self.grid
-        if g.winfo_width() < 2:   # noch nicht ausgelegt - <Configure> zeichnet gleich mit der echten Breite
+        if g.winfo_width() < 2:   # Not laid out yet; Configure redraws at actual width
             return
         g.delete("all")
         self.shown = self.shown_items()
@@ -3870,7 +3857,7 @@ class ModelSelector(OverlayDialog):
     ROW_H = 26
 
     def fill_presets(self):
-        """Presets des gewaehlten Blocktyps (rechte Spalte); Klick waehlt eines mit aus."""
+        """Selected block type's presets in right column; click includes one in selection."""
         c = self.plist
         c.delete("all")
         self.preset_items = (self.presets(self.pick[1]) or []) if self.pick else []
@@ -3892,7 +3879,7 @@ class ModelSelector(OverlayDialog):
         i = int(self.plist.canvasy(e.y) // px(self.ROW_H))
         if 0 <= i < len(self.preset_items):
             it = self.preset_items[i]
-            self.preset = None if it == self.preset else it   # zweiter Klick waehlt ab
+            self.preset = None if it == self.preset else it   # Second click deselects
             self.fill()
 
     def _click(self, e):

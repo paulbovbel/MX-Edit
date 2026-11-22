@@ -1,16 +1,16 @@
-"""nam.py - Dialog "NAM models": die Modelle der NAM-Mod (github.com/lolgab/headrush-nam-mod) auf
-dem Geraet verwalten - hochladen, ersetzen, umbenennen, sortieren, loeschen, herunterladen - ueber
-die Dateifunktionen der Bruecke (0.7 mit NAM gebaut).
+"""nam.py: manage NAM models (github.com/lolgab/headrush-nam-mod) on the device:
+upload, replace, rename, reorder, delete and download through bridge file
+operations (0.7 built with NAM).
 
-Die Liste zeigt die Modelle in der Reihenfolge des Geraets: Platz = Drive-Wert des Anxiety OD,
-der das Modell waehlt. Jede Aenderung benennt den Ordner lueckenlos 'NNN - Name.nam' und zieht
-die Drive-Werte der Rigs und NAM-Presets nach (live.nam_apply), damit jedes Rig sein Modell
-behaelt; Rigs mit einem geloeschten Modell werden stumm. Die Mod liest den Ordner nur beim
-App-Start - der Editor startet die Geraete-App beim Schliessen neu (nam_dialog_done). Die Verwaltung
-ist eine eigene Seite an Stelle der Hauptansicht (ui.Page wie der Setlist-Manager).
+The list follows device order: position is the Anxiety OD Drive value that
+selects the model. Each change renumbers files contiguously as 'NNN - Name.nam'
+and updates rig/NAM-preset Drive values (live.nam_apply) so rigs keep their
+models. Rigs whose model was deleted become silent. NAM scans the folder only
+at app startup; the editor restarts the device app on close (nam_dialog_done).
+Management is a dedicated ui.Page replacing the main view, like setlists.
 
-NAMBrowser ist die Modellauswahl eines NAM-Blocks (Parameterzeile "Model"); mit der Einstellung
-"audition" setzt ein Klick das Modell sofort und die Auswahl bleibt zum Durchprobieren offen.
+NAMBrowser selects a NAM block's model (Model parameter). With audition enabled,
+a click applies the model immediately and keeps the browser open for comparison.
 """
 import os, tkinter as tk
 from tkinter import ttk, filedialog
@@ -22,7 +22,7 @@ from ui import FONT_SMALL
 from ui import messagebox
 
 
-FONT_MONO = (U.MONO, 10)   # Liste mit Spalten (Platz, Name, Groesse)
+FONT_MONO = (U.MONO, 10)   # List columns: position, name, size
 
 
 def size_text(n):
@@ -30,16 +30,16 @@ def size_text(n):
 
 
 class NAMPage(U.Page):
-    """Eigene Seite an Stelle der Hauptansicht (wie der Setlist-Manager).
+    """Dedicated page replacing the main view, like the setlist manager.
     data: {'nam': nam_status, 'models': db_nam_models()['models'], 'usage': nam_usage}."""
 
     def __init__(self, editor, data):
         super().__init__(editor, "NAM models")
         self.ed = editor
         self.closed = False
-        self.changed = False          # Dateien geaendert -> Neustart der Geraete-App noetig
-        self.loading = None           # ui.Loading, solange die Liste noch vom Geraet kommt (data=None)
-        if data is None:              # sofort offen, die Liste kommt mit loaded()
+        self.changed = False          # Changed files require a device app restart
+        self.loading = None           # ui.Loading while awaiting the device list (data=None)
+        if data is None:              # Open immediately; loaded() supplies the list later
             self.nam, self.models, self.usage = {}, [], {}
             self.build()
             self.loading = U.Loading(self.body, "Loading NAM models …")
@@ -60,7 +60,7 @@ class NAMPage(U.Page):
             self.loading.fail(text)
 
     def title(self):
-        return "NAM models"   # fuer Rueckfragen (wie Toplevel.title())
+        return "NAM models"   # For confirmations (like Toplevel.title())
 
     def cancel(self):
         self.close()
@@ -72,7 +72,7 @@ class NAMPage(U.Page):
         self.ed.nam_dialog_done(self)
         super().close(result)
 
-    # ---------------- Aufbau ----------------
+    # ---------------- Layout ----------------
     def build(self):
         b = self.body
         self.lbl_info = tk.Label(b, text="", bg=PANEL, fg=MUTED, font=FONT_SMALL, anchor="w")
@@ -124,11 +124,11 @@ class NAMPage(U.Page):
         self.btn_delete = U.Btn(bf, "Delete …", command=self.delete_selected, kind="danger", **small)
         self.btn_delete.pack(side="left", padx=(px(10), 0))
         self.lbl_restart = tk.Label(b, text="", bg=PANEL, fg=ACCENT, font=FONT_SMALL, anchor="w", wraplength=px(780),
-                                    justify="left")   # erst bei einer Aenderung gezeigt (mark_changed)
+                                    justify="left")   # Shown only after a change (mark_changed)
 
-    # ---------------- Liste ----------------
+    # ---------------- List ----------------
     def set_data(self, data, select=None, build=False):
-        self.nam = dict(data["nam"], active=True)   # Umschreiben der Rigs auch, wenn NAM gerade aus ist
+        self.nam = dict(data["nam"], active=True)   # Update rigs even if NAM is currently disabled
         self.models = data["models"]
         self.usage = data.get("usage") or {}
         if build:
@@ -136,7 +136,8 @@ class NAMPage(U.Page):
         nam = data["nam"]
         state = "on" if nam.get("active") else ("switched off automatically" if nam.get("auto_off") else "off")
         ref = nam.get("ref") or ""
-        ref = "" if ref == "unbekannt" else " " + ref   # Patcher ohne Herkunftsangabe schreibt 'unbekannt'
+        # Accept the legacy marker from older patchers as well as English firmware.
+        ref = "" if ref in ("unknown", "unbekannt") else " " + ref
         self.lbl_info.configure(text="NAM mod%s  ·  %s  ·  %d instance(s)  ·  %d of %d possible models"
                                 % (ref, state, nam.get("instances", 2), len(self.models), L.NAM_STEPS))
         self.fill(select)
@@ -146,7 +147,7 @@ class NAMPage(U.Page):
         keep = select if select is not None else [self.models[i]["file"] for i in lb.curselection()
                                                   if i < len(self.models)]
         lb.delete(0, "end")
-        # Spaltenbreite in Zeichen der Festbreitenschrift aus der Listenbreite
+        # Column widths in monospace characters, derived from list width
         cw = max(40, lb.winfo_width() // max(1, U.text_size("0", FONT_MONO)[0]) - 1)
         for m in self.models:
             users = self.usage.get(m["index"], [])
@@ -198,15 +199,15 @@ class NAMPage(U.Page):
         self.lbl_restart.configure(text="The NAM mod reads its models only when the device app starts: the app is "
                                         "restarted when you close this page (about 15 s).")
 
-    # ---------------- Aenderungen ----------------
+    # ---------------- Changes ----------------
     def apply(self, final, text, delete=(), replace=None, select=None, done_text=None):
-        """final: [(Quelle, Name)] in neuer Reihenfolge -> live.nam_apply, danach alles neu lesen."""
+        """final: [(source, name)] in new order -> live.nam_apply, then reread everything."""
         old = [m["file"] for m in self.models]
         nam = self.nam
         if not self.ed.session or self.ed._job:
             self.ed.status.set("Please wait, the device is still busy.")
             return
-        # ab hier kann sich der Ordner aendern (auch bei einem Fehler mittendrin) -> Neustart beim Schliessen
+        # The folder may change from here, even on failure; restart on close
         self.mark_changed()
         screen = U.ProgressOverlay(self.ed, text.rstrip(" …"), "Preparing …",
                                    "Rigs and presets that use moved models are updated as well.")
@@ -216,7 +217,7 @@ class NAMPage(U.Page):
             err, res = None, None
             try:
                 res = L.nam_apply(br, nam, old, final, delete=delete, replace=replace, progress=say)
-            except Exception as e:   # Fehler melden, den Stand trotzdem neu lesen (ausser die Verbindung ist weg)
+            except Exception as e:   # Report errors but reread state anyway, unless disconnected
                 if L.transport_error(e):
                     raise
                 err = str(e)
@@ -305,7 +306,7 @@ class NAMPage(U.Page):
         if (d < 0 and idx[0] == 0) or (d > 0 and idx[-1] == len(items) - 1):
             return
         order = list(range(len(items)))
-        for i in (idx if d < 0 else reversed(idx)):   # Block der Auswahl um eins verschieben
+        for i in (idx if d < 0 else reversed(idx)):   # Move the selected group by one position
             order[i], order[i + d] = order[i + d], order[i]
         final = [items[i] for i in order]
         self.apply(final, "Moving NAM models …", select=[m["name"] for m in sel], done_text="Moved.")
@@ -386,11 +387,11 @@ class NAMPage(U.Page):
 
 
 class NAMBrowser(U.Overlay):
-    """Auswahl des NAM-Modells eines Blocks (ersetzt die einfache Liste). labels: Anzeige je
-    Drive-Platz 0..n-1, dahinter 'kein Modell (stumm)' = L.NAM_SILENT. on_pick(idx) setzt den Drive.
-    audition (Einstellung): ein Klick setzt das Modell sofort, der Dialog bleibt offen;
-    "Done"/x behaelt es, "Revert" setzt das Modell vom Oeffnen zurueck. Ohne audition wie bisher:
-    Doppelklick/Apply setzt und schliesst. on_manage: Knopf "Manage models …" (oeffnet die NAMPage)."""
+    """NAM block model browser, replacing the simple list. labels: Drive slots
+    0..n-1 followed by 'No model (silent)' = L.NAM_SILENT. on_pick(idx) sets Drive.
+    Audition: a click applies immediately without closing; Done/x keeps it and
+    Revert restores the initial model. Without audition, double-click/Apply
+    selects and closes. on_manage handles Manage models and opens NAMPage."""
 
     SILENT = "No model (silent)"
 

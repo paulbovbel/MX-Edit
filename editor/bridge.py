@@ -1,27 +1,25 @@
-"""bridge.py - Client fuer die MX5 Bridge (SysEx ueber USB-MIDI).
+"""bridge.py: MX5 Bridge client (SysEx over USB-MIDI).
 
-Unterstuetzt Firmware-Bruecke 0.1 (einteilige Antworten), 0.2
-(Antworten in Teilen: <cmd> <teil> <teile> <text>), 0.3 (SQL-Abfragen
-der Rig-Datenbank, nur lesend) und 0.4 (schreibende SQL-Transaktionen und
-Aktionen des Datenbankdienstes: status, backup, restore, restart) und 0.5
-(Zeichen ausserhalb von ASCII in beiden Richtungen als Escape 0x7F + vier
-Hex-Ziffern statt '?'; bridge.py kodiert/dekodiert das selbst, Aufrufer sehen
-normalen Text) und 0.6 (langer Antwortkopf mit 14-Bit-Teilezaehler, angefordert
-ueber das Bit 0x20 im Befehl - Antworten bis ca. 6 MB statt 48 KB; Befehl 0x0B
-SHELL; der SQL-Lesekanal ist wirklich nur lesend).
+Supports bridge 0.1 (single-part replies), 0.2 (multipart replies:
+<cmd> <part> <total> <text>), 0.3 (read-only rig database SQL),
+0.4 (SQL write transactions and database actions: status, backup, restore,
+restart), 0.5 (non-ASCII characters escaped as 0x7F plus four hex digits
+instead of '?'; encoding/decoding is transparent to callers), and 0.6
+(long reply headers with 14-bit part counters, requested by command bit
+0x20: about 6 MB replies instead of 48 KB; SHELL command 0x0B;
+the SQL read channel is strictly read-only).
 
-Dateien auf dem Geraet (read_file, write_file, make_dir, list_dir, shell): ab
-Bruecke 0.6 ueber den Befehl SHELL (Daten base64); 0.3 bis 0.5 ueber den
-SQL-Lesekanal, dessen sqlite3-Shell readfile()/writefile()/fsdir() und den
-Punktbefehl .system (eine Shell-Zeile als root) kennt.
+Device files (read_file, write_file, make_dir, list_dir, shell): bridge
+0.6+ uses SHELL with base64 data; 0.3-0.5 use the SQL read channel's
+sqlite3 readfile()/writefile()/fsdir() and .system (one shell line as root).
 """
 import base64, json, re, time, uuid
 
 HDR = [0x7D, 0x48, 0x52]
 _ESCAPED = re.compile("\x7f([0-9A-Fa-f]{4})")
 KEYWORDS = ["mx5", "headrush", "gadget", "f_midi", "midi function"]
-MAX_REPLY = 40000   # geschaetzte Antwortgroesse je Sammelabfrage (Grenze der Bruecke: 127 x 380 Zeichen)
-PER_VALUE = 220     # Antwortzeichen je Wert zusaetzlich zum Pfad (gemessen ~130-160)
+MAX_REPLY = 40000   # Estimated reply size per batch (bridge limit: 127 x 380 characters)
+PER_VALUE = 220     # Reply characters per value in addition to its path (measured ~130-160)
 # Bound complete outgoing messages, including F0/F7. ALSA's sequencer output
 # pool can reject a whole rig (SQL hex literals make it roughly twice as big).
 MAX_REQUEST = 4096
@@ -33,7 +31,7 @@ class BridgeError(Exception):
 
 
 class NoReply(BridgeError):
-    """Keine Antwort, und auch ein kurzer Ping danach blieb aus: das Geraet ist weg."""
+    """No reply, including to a subsequent short ping: the device is disconnected."""
 
 
 class Bridge:
@@ -44,13 +42,13 @@ class Bridge:
         self.inp = mido.open_input(in_name)
         self.out = mido.open_output(out_name)
         self.seq = 0
-        self.v2 = None      # None = unbekannt, per ping() ermittelt
-        self.v3 = False     # Datenbankdienst (SQL) vorhanden
-        self.v4 = False     # Datenbankdienst schreibt (SQL-Transaktionen, Aktionen)
-        self.unicode = False  # Bruecke 0.5: Nicht-ASCII-Zeichen kommen unbeschaedigt durch
-        self.long = False     # Bruecke 0.6: langer Antwortkopf (14-Bit-Teilezaehler), Befehl SHELL
+        self.v2 = None      # None = unknown, determined by ping()
+        self.v3 = False     # Database service (SQL) available
+        self.v4 = False     # Database writes (SQL transactions and actions) available
+        self.unicode = False  # Bridge 0.5: non-ASCII characters survive transport unchanged
+        self.long = False     # Bridge 0.6: long reply header (14-bit part counter), SHELL command
         self.version = ""
-        self.vnum = (0, 0)  # Versionsnummer aus dem Ping, z. B. (0, 5)
+        self.vnum = (0, 0)  # Version from ping, e.g. (0, 5)
         self._drain()
 
     @staticmethod
@@ -59,12 +57,12 @@ class Bridge:
         def pick(names):
             hits = [n for n in names if any(k in n.lower() for k in KEYWORDS)]
             if len(hits) != 1:
-                raise BridgeError("MX5-MIDI-Port nicht eindeutig gefunden: %s" % names)
+                raise BridgeError("Could not identify a unique MX5 MIDI port: %s" % names)
             return hits[0]
         try:
             ins, outs = mido.get_input_names(), mido.get_output_names()
-        except Exception as e:   # z. B. Linux ohne ALSA-Sequencer (snd-seq), fehlendes Backend
-            raise BridgeError("MIDI nicht verfuegbar: %s" % e)
+        except Exception as e:   # E.g. Linux without ALSA sequencer (snd-seq), or missing backend
+            raise BridgeError("MIDI unavailable: %s" % e)
         return pick(ins), pick(outs)
 
     @classmethod
@@ -89,11 +87,11 @@ class Bridge:
         return len(d) >= 7 and d[5] < d[6] <= 127 and (self.v2 or (d[5] == 0 and d[6] >= 1))
 
     def request(self, cmd, text="", timeout=3.0):
-        if self.inp.closed or self.out.closed:   # send() auf geschlossenem rtmidi-Port stuerzt ab
-            raise BridgeError("MIDI-Port geschlossen")
+        if self.inp.closed or self.out.closed:   # send() on a closed rtmidi port crashes
+            raise BridgeError("MIDI port closed")
         self.seq = self.seq % 127 + 1
         seq = self.seq
-        long_hdr = self.long and cmd != 0x01   # der Ping antwortet immer kurz (Version noch unbekannt)
+        long_hdr = self.long and cmd != 0x01   # Ping always uses a short reply (version not yet known)
         data = HDR + [seq, cmd | (0x20 if long_hdr else 0)] + \
             [ord(c) & 0x7F for c in (escape(text) if self.unicode else text)]
         if len(data) + 2 > MAX_REQUEST:
@@ -110,7 +108,7 @@ class Bridge:
                 if d[:3] != HDR or len(d) < 5 or d[3] != seq:
                     continue
                 code = d[4]
-                if long_hdr and len(d) >= 9:   # <teil hi> <teil lo> <teile hi> <teile lo>
+                if long_hdr and len(d) >= 9:   # <part hi> <part lo> <total hi> <total lo>
                     total = d[7] << 7 | d[8]
                     parts[d[5] << 7 | d[6]] = "".join(chr(b) for b in d[9:])
                     deadline = time.time() + timeout
@@ -133,8 +131,8 @@ class Bridge:
                 return code, body
             time.sleep(0.002)
         if parts:
-            raise BridgeError("Antwort unvollstaendig (%d von %d Teilen)" % (len(parts), total))
-        raise BridgeError("Keine Antwort vom Geraet")
+            raise BridgeError("Incomplete reply (%d of %d parts)" % (len(parts), total))
+        raise BridgeError("No reply from device")
 
     def _send_message(self, data):
         try:
@@ -177,30 +175,30 @@ class Bridge:
                 pass
             raise
 
-    RETRY_PING = 1.0   # s: Ping vor dem Wiederholen einer ausgebliebenen Antwort
+    RETRY_PING = 1.0   # Seconds: ping before retrying a missing reply
 
     def _retry(self, fn, *a):
-        """Einmal wiederholen, wenn eine Antwort ausblieb oder unvollstaendig war. Blieb sie ganz
-        aus, wird erst kurz gepingt: antwortet das Geraet auch darauf nicht, kommt sofort NoReply
-        (Verlust nach ~4 s erkannt statt nach zwei vollen Zeitlimits)."""
+        """Retry once if a reply is missing or incomplete. If entirely missing,
+        ping briefly first; if that also fails, raise NoReply immediately.
+        Detects disconnection in ~4 s instead of two full timeouts."""
         try:
             return fn(*a)
         except BridgeError as e:
-            if "unvollstaendig" not in str(e) and "Keine Antwort" not in str(e):
+            if "Incomplete reply" not in str(e) and "No reply" not in str(e):
                 raise
             self._drain()
-            if "Keine Antwort" in str(e):
+            if "No reply" in str(e):
                 try:
                     self.request(0x01, timeout=self.RETRY_PING)
                 except BridgeError:
-                    raise NoReply("Keine Antwort vom Geraet (auch nicht auf einen Ping)")
+                    raise NoReply("No reply from device (including ping)")
                 self._drain()
             return fn(*a)
 
-    # ---------- Befehle ----------
+    # ---------- Commands ----------
     def ping(self):
         self.v2 = None
-        code, body = self.request(0x01)   # Antwort 'MX5Bridge-0.5 f_midi' ist reines ASCII
+        code, body = self.request(0x01)   # Reply 'MX5Bridge-0.5 f_midi' is plain ASCII
         self.version = body
         m = re.match(r"MX5Bridge-(\d+)\.(\d+)", body)
         self.vnum = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
@@ -222,13 +220,13 @@ class Bridge:
         return json.loads(body.split("\t", 1)[1])
 
     def entries(self, path):
-        self._need_v2("Auswahllisten")
+        self._need_v2("Choice lists")
         code, body = self._retry(self.request, 0x04, path)
         return json.loads(body.split("\t", 1)[1])
 
     def get_many(self, paths):
-        """Mehrere Werte lesen; bei Bruecke 0.1 einzeln. Aufgeteilt wird nach der geschaetzten
-        Antwortgroesse; ist eine Antwort doch zu gross, wird die Gruppe halbiert."""
+        """Read multiple values (individually on bridge 0.1). Split by estimated
+        reply size; halve a batch if its reply still exceeds the limit."""
         if not self.v2:
             return {p: self.get(p) for p in paths}
         result, group, size = {}, [], 0
@@ -246,7 +244,8 @@ class Bridge:
         try:
             code, body = self._retry(self.request, 0x05, "\n".join(group))
         except BridgeError as e:
-            if "zu gross" not in str(e) or len(group) < 2:
+            # Accept both English replies and older, German-language firmware.
+            if not any(s in str(e) for s in ("too large", "zu gross")) or len(group) < 2:
                 raise
             half = len(group) // 2
             return dict(self._get_group(group[:half]), **self._get_group(group[half:]))
@@ -257,29 +256,28 @@ class Bridge:
         return self.request(0x07, js)[1]
 
     def sql(self, query, timeout=20.0):
-        """Nur-Lese-Abfrage der Rig-Datenbank (Bruecke 0.3). Liefert die Zeilen als
-        Liste von dicts; Fehler der Datenbank kommen als BridgeError."""
+        """Read-only rig database query (bridge 0.3). Return rows as a list of
+        dictionaries; database failures raise BridgeError."""
         if not self.v3:
-            raise BridgeError("SQL-Abfragen benoetigen die Firmware-Bruecke 0.3")
+            raise BridgeError("SQL queries require bridge firmware 0.3")
         return self._db(0x08, query, timeout)
 
     def sql_write(self, statements, timeout=30.0):
-        """Schreibende SQL-Anweisungen (Bruecke 0.4). Der Dienst fuehrt sie als eine
-        Transaktion aus (foreign_keys an); beim ersten Fehler wird nichts geschrieben
-        und ein BridgeError geworfen. Vor dem ersten Schreiben seit dem Einschalten
-        sichert der Dienst die Datenbank auf dem Geraet. Liefert die Zahl der
-        geaenderten Zeilen."""
+        """Execute SQL writes (bridge 0.4) as one transaction with foreign keys enabled.
+        The first error rolls back all writes and raises BridgeError. Before
+        the first write after boot, the service backs up the device database.
+        Return the number of changed rows."""
         if not self.v4:
-            raise BridgeError("Schreiben in die Datenbank benoetigt die Firmware-Bruecke 0.4")
+            raise BridgeError("Database writes require bridge firmware 0.4")
         rows = self._db(0x09, statements, timeout)
         return rows[0].get("changes", 0) if rows else 0
 
     def action(self, name, timeout=60.0):
-        """Aktion des Datenbankdienstes (Bruecke 0.4): status, backup, restore, restart.
-        restore/restart beenden die Geraete-App; sie startet nach ca. 15 s neu, die
-        Bridge ist solange weg (neu verbinden)."""
+        """Database action (bridge 0.4): status, backup, restore, restart.
+        restore/restart stop the device app; it restarts after ~15 s.
+        The bridge is unavailable meanwhile; reconnect afterwards."""
         if not self.v4:
-            raise BridgeError("Aktionen benoetigen die Firmware-Bruecke 0.4")
+            raise BridgeError("Actions require bridge firmware 0.4")
         rows = self._db(0x0A, name, timeout)
         return rows[0] if rows else {}
 
@@ -287,40 +285,40 @@ class Bridge:
         code, body = self.request(cmd, text, timeout=timeout)
         r = json.loads(body)
         if not r.get("ok"):
-            raise BridgeError("SQL: %s" % (r.get("err") or "unbekannter Fehler"))
+            raise BridgeError("SQL: %s" % (r.get("err") or "unknown error"))
         return r.get("rows") or []
 
-    # ---------- Dateien auf dem Geraet (Bruecke 0.3, SQL-Lesekanal) ----------
+    # ---------- Device files (bridge 0.3, SQL read channel) ----------
     def _need_v3(self, what):
         if not self.v3:
-            raise BridgeError("%s benoetigen die Firmware-Bruecke 0.3" % what)
+            raise BridgeError("%s require bridge firmware 0.3" % what)
 
-    # ---------- Dateien und Shell ab Bruecke 0.6 (Befehl SHELL, Daten base64) ----------
+    # ---------- Files and shell on bridge 0.6+ (SHELL, base64 data) ----------
     SQLITE = "/usr/Evil/Scripts/mx5bridge-sqlite3"
-    FILE_PAGE = 192 * 1024      # Bytes je Lese-Anfrage (base64 ~256 KB Antwort, ~1,5 s)
-    FILE_CHUNK = 48 * 1024      # Bytes je Schreib-Anfrage (base64 64 KB Anfrage)
+    FILE_PAGE = 192 * 1024      # Bytes per read request (base64 reply ~256 KB, ~1.5 s)
+    FILE_CHUNK = 48 * 1024      # Bytes per write request (base64 request ~64 KB)
 
     def _shell6(self, script, timeout=70.0):
-        """Shell-Skript (auch mehrzeilig) per Befehl SHELL: (Exit-Code, Ausgabe inkl. stderr)."""
+        """Run a shell script (including multiline) via SHELL: (exit code, output including stderr)."""
         rows = self._db(0x0B, script, timeout)
         r = rows[0] if rows else {}
         return int(r.get("rc", -1)), r.get("out") or ""
 
     def _check6(self, rc, out, what):
         if rc != 0:
-            raise BridgeError("%s (Exit-Code %d): %s" % (what, rc, out.strip()[:300]))
+            raise BridgeError("%s (exit code %d): %s" % (what, rc, out.strip()[:300]))
         return out
 
     def _read_file6(self, path):
         q = sh_quote(path)
-        size = int(self._check6(*self._shell6("wc -c < %s" % q), what="Datei nicht lesbar: %s" % path).strip())
+        size = int(self._check6(*self._shell6("wc -c < %s" % q), what="Cannot read file: %s" % path).strip())
         out = bytearray()
         for k in range((size + self.FILE_PAGE - 1) // self.FILE_PAGE):
             rc, b64 = self._shell6("dd if=%s bs=%d skip=%d count=1 2>/dev/null | base64 -w 0"
                                    % (q, self.FILE_PAGE, k))
-            out += base64.b64decode(self._check6(rc, b64, "Lesen fehlgeschlagen: %s" % path).strip())
+            out += base64.b64decode(self._check6(rc, b64, "Read failed: %s" % path).strip())
         if len(out) != size:
-            raise BridgeError("Datei unvollstaendig gelesen (%d statt %d Bytes): %s" % (len(out), size, path))
+            raise BridgeError("Incomplete file read (%d instead of %d bytes): %s" % (len(out), size, path))
         return bytes(out)
 
     def _write_file6(self, path, data, progress=None):
@@ -328,35 +326,35 @@ class Bridge:
         for off in range(0, max(len(data), 1), self.FILE_CHUNK):
             part = base64.b64encode(data[off:off + self.FILE_CHUNK]).decode("ascii")
             self._check6(*self._shell6("printf '%%s' '%s' | base64 -d %s %s" % (part, ">" if off == 0 else ">>", q)),
-                         what="Schreiben fehlgeschlagen: %s" % path)
+                         what="Write failed: %s" % path)
             if progress:
                 progress(min(len(data), off + self.FILE_CHUNK), len(data))
-        n = int(self._check6(*self._shell6("wc -c < %s" % q), what="Datei nicht lesbar: %s" % path).strip())
+        n = int(self._check6(*self._shell6("wc -c < %s" % q), what="Cannot read file: %s" % path).strip())
         if n != len(data):
-            raise BridgeError("Datei unvollstaendig geschrieben (%s statt %d Bytes): %s" % (n, len(data), path))
+            raise BridgeError("Incomplete file write (%s instead of %d bytes): %s" % (n, len(data), path))
         return n
 
     def _list_dir6(self, path, recursive):
-        # fsdir der sqlite3-Shell (als eigener Prozess, nicht im Lesekanal): Namen kommen dank der
-        # Zeichen-Escapes (0.5) unveraendert, eine Antwort fasst alles (langer Kopf)
+        # sqlite3 fsdir runs in a separate process, not the read channel. Character escapes
+        # (0.5) preserve filenames; a long-header reply fits all entries.
         cond = "" if recursive else " and name not glob %s" % sql_lit(path + "/*/*")
         sql = ("select name, (mode & 61440) = 16384 as d, mtime from fsdir(%s) where name <> %s%s order by name"
                % (sql_lit(path), sql_lit(path), cond))
         out = self._check6(*self._shell6("%s -json :memory: %s" % (self.SQLITE, sh_quote(sql))),
-                           what="Ordner nicht lesbar: %s" % path)
+                           what="Cannot read folder: %s" % path)
         rows = json.loads(out) if out.strip() else []
         return [(r["name"][len(path) + 1:], bool(r.get("d")), r.get("mtime")) for r in rows]
 
     def read_file(self, path, page=20000):
-        """Datei vom Geraet lesen (Bytes); seitenweise als Hex, weil eine Antwort
-        hoechstens ca. 48 KB fasst (ab 0.6 ueber SHELL, base64)."""
+        """Read device file bytes, paginated as hex because replies are limited to
+        about 48 KB (bridge 0.6+ uses SHELL and base64)."""
         if self.long:
             return self._read_file6(path)
-        self._need_v3("Dateizugriffe")
+        self._need_v3("File operations")
         rows = self.sql("select length(readfile(%s)) as n" % sql_lit(path))
         size = rows[0].get("n") if rows else None
         if size is None:
-            raise BridgeError("Datei nicht lesbar: %s" % path)
+            raise BridgeError("Cannot read file: %s" % path)
         out = bytearray()
         for off in range(0, size, page):
             rows = self.sql("select hex(substr(readfile(%s), %d, %d)) as h" % (sql_lit(path), off + 1, page))
@@ -364,12 +362,11 @@ class Bridge:
         return bytes(out)
 
     def write_file(self, path, data, chunk=30000, progress=None):
-        """Datei auf dem Geraet schreiben (ueberschreibt); in Stuecken, die an die Datei
-        angehaengt werden. progress(geschrieben, gesamt) nach jedem Stueck. Liefert die
-        geschriebene Laenge."""
+        """Write/overwrite a device file in appended chunks. Call progress(written,
+        total) after each chunk. Return the number of bytes written."""
         if self.long:
             return self._write_file6(path, data, progress)
-        self._need_v3("Dateizugriffe")
+        self._need_v3("File operations")
         lit = sql_lit(path)
         first = True
         for off in range(0, max(len(data), 1), chunk):
@@ -380,31 +377,31 @@ class Bridge:
                 q = "select writefile(%s, readfile(%s) || unhex('%s')) as n" % (lit, lit, part)
             rows = self.sql(q, timeout=30.0)
             if not rows or rows[0].get("n") is None:
-                raise BridgeError("Schreiben fehlgeschlagen: %s" % path)
+                raise BridgeError("Write failed: %s" % path)
             first = False
             if progress:
                 progress(min(len(data), off + chunk), len(data))
         rows = self.sql("select length(readfile(%s)) as n" % lit)
         n = rows[0].get("n") if rows else None
         if n != len(data):
-            raise BridgeError("Datei unvollstaendig geschrieben (%s statt %d Bytes): %s" % (n, len(data), path))
+            raise BridgeError("Incomplete file write (%s instead of %d bytes): %s" % (n, len(data), path))
         return n
 
     def make_dir(self, path):
-        """Ordner anlegen (bestehender Ordner ist kein Fehler)."""
+        """Create a directory; an existing directory is not an error."""
         if self.long:
-            self._check6(*self._shell6("mkdir -p %s" % sh_quote(path)), what="Ordner nicht anlegbar: %s" % path)
+            self._check6(*self._shell6("mkdir -p %s" % sh_quote(path)), what="Cannot create folder: %s" % path)
             return
-        self._need_v3("Dateizugriffe")
+        self._need_v3("File operations")
         self.sql("select writefile(%s, null, 16877) as n" % sql_lit(path))   # 040755
 
     def list_dir(self, path, recursive=False):
-        """Eintraege eines Ordners: [(name, ist_ordner, mtime)], Namen relativ zu path
-        (rekursiv mit Unterpfaden). Namen mit Nicht-ASCII-Zeichen kommen als Hex, weil
-        der SysEx-Weg nur 7 Bit traegt (bis 0.4)."""
+        """List [(name, is_directory, mtime)], with names relative to path (including
+        subpaths when recursive). Non-ASCII names use hex because SysEx is
+        limited to 7 bits through bridge 0.4."""
         if self.long:
             return self._list_dir6(path, recursive)
-        self._need_v3("Dateizugriffe")
+        self._need_v3("File operations")
         lit = sql_lit(path)
         cond = "" if recursive else " and name not glob %s" % sql_lit(path + "/*/*")
         out, page, off = [], 300, 0
@@ -421,14 +418,14 @@ class Bridge:
             off += page
 
     def shell(self, cmd, timeout=30.0):
-        """Eine Shell-Zeile auf dem Geraet ausfuehren (als root). Liefert (Exit-Code, Ausgabe);
-        cmd darf keinen Zeilenumbruch enthalten (ab 0.6 schon: Befehl SHELL). Nicht-ASCII-Zeichen
-        in Pfaden ueber sh_quote()."""
+        """Run a shell command on the device as root; return (exit code, output).
+        No newlines in cmd before bridge 0.6 (SHELL). Use sh_quote() for
+        non-ASCII paths."""
         if self.long:
             return self._shell6(cmd, timeout=max(timeout, 70.0))
-        self._need_v3("Shell-Befehle")
+        self._need_v3("Shell commands")
         if "\n" in cmd or "\r" in cmd:
-            raise BridgeError("Shell-Befehl darf nur eine Zeile sein")
+            raise BridgeError("Shell command must be a single line")
         out, rc = "/tmp/mx5bridge/sh.out", "/tmp/mx5bridge/sh.rc"
         rows = self.sql(".system { %s ; } > %s 2>&1; echo $? > %s\n"
                         "select cast(readfile('%s') as text) as out, cast(readfile('%s') as text) as rc"
@@ -442,12 +439,12 @@ class Bridge:
 
     def _need_v2(self, what):
         if self.v2 is False:
-            raise BridgeError("%s benoetigen die Firmware-Bruecke 0.2" % what)
+            raise BridgeError("%s require bridge firmware 0.2" % what)
 
 
 def escape(text):
-    """Text fuer die Leitung (Bruecke 0.5): alles ausser Tab, LF und 0x20..0x7E als 0x7F + 4 Hex-Ziffern
-    je UTF-16-Einheit (Zeichen ausserhalb der BMP also als Surrogatpaar)."""
+    """Wire encoding (bridge 0.5): escape everything except TAB, LF and 0x20..0x7E
+    as 0x7F plus four hex digits per UTF-16 unit (non-BMP characters use surrogate pairs)."""
     if all(c in "\t\n" or " " <= c <= "~" for c in text):
         return text
     out = []
@@ -461,7 +458,7 @@ def escape(text):
 
 
 def unescape(text):
-    """Gegenstueck zu escape: Escapes aufloesen, Surrogatpaare zusammenfuegen."""
+    """Inverse of escape: decode escapes and combine surrogate pairs."""
     if "\x7f" not in text:
         return text
     s = _ESCAPED.sub(lambda m: chr(int(m.group(1), 16)), text)
@@ -469,8 +466,8 @@ def unescape(text):
 
 
 def sql_lit(s):
-    """SQL-Stringliteral; Nicht-ASCII-Text als Hex (cast(x'..' as text)), weil SysEx nur
-    7 Bit traegt (bis Bruecke 0.4; ab 0.5 ginge auch der Klartext)."""
+    """SQL string literal. Encode non-ASCII text as hex (cast(x'..' as text))
+    for 7-bit SysEx through bridge 0.4; bridge 0.5+ also accepts plain text."""
     s = str(s)
     if all(" " <= c <= "~" for c in s):
         return "'" + s.replace("'", "''") + "'"
@@ -478,7 +475,7 @@ def sql_lit(s):
 
 
 def sh_quote(s):
-    """Shell-Argument fuer Bridge.shell(): einfach gequotet, Nicht-ASCII ueber printf-Oktalfolgen."""
+    """Bridge.shell() argument: single-quoted, with non-ASCII encoded via printf octal escapes."""
     if all(" " <= c <= "~" for c in s):
         return "'" + s.replace("'", "'\\''") + "'"
     return '"$(printf \'%s\')"' % "".join(chr(c) if 32 <= c <= 126 and chr(c) not in "'\\%" else "\\%03o" % c

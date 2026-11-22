@@ -1,26 +1,25 @@
-"""hardware.py - Feld "Hardware" unter dem Signalpfad (Fussschalter, Pedale, Tempo).
+"""hardware.py: Hardware panel below the signal chain (footswitches, pedals, tempo).
 
-Eingebettetes Feld im Hauptfenster (kein eigenes Fenster).
-  Fussschalter: drei breite Kacheln, die die Schalter des MX5 spiegeln. Kopfzeile je
-                Kachel: Modus-Pille (Klick = Scene/Toggle), Beschriftung (Doppelklick =
-                aendern), bei Scenes die Zustaende-Pille (Klick = 1 <-> 2 Zustaende).
-                Darunter bei Scenes ein Feld je Zustand in seiner Farbe (bei zwei
-                Zustaenden waagerecht geteilt): Klick = Scene im Signalpfad bearbeiten
-                (Editor.set_scene). Bei Toggle ein Feld mit Block + Funktion: Klick =
-                Block im Signalpfad waehlen (Editor.set_assign). Rechtsklick = Menue.
-                Unten die Farbpalette fuer den gewaehlten Schalter/Zustand.
-  Pedale:       Expression-Pedal 1/2 mit Classic/Advanced und bis zu vier Zuweisungen.
-  Tempo:        Rig-Tempo (Fixed/Current, BPM) und MIDI-Programmnummer.
+Embedded in the main window, not a separate window.
+  Footswitches: three wide tiles mirroring the MX5 switches. Each header has
+    a mode pill (click: Scene/Toggle), label (double-click to edit), and for
+    scenes a state-count pill (click: one/two states). Below, each scene state
+    has a colored field (two states split horizontally); click to edit it in
+    the chain (Editor.set_scene). A toggle shows block/function; click to pick
+    its block in the chain (Editor.set_assign). Right-click opens a menu.
+    A palette below edits the selected switch/state color.
+  Pedals: expression pedal 1/2, Classic/Advanced, up to four assignments.
+  Tempo: rig tempo (Fixed/Current, BPM) and MIDI program number.
 
-Breite Fenster (ab WIDE logischen Pixeln): Fussschalter und Pedale nebeneinander,
-Tempo/Programmnummer in der Kopfzeile, keine Reiter; schmalere: Reiter.
-Der Editor ruft refresh() auf, wenn er die Zuweisungen neu vom Geraet gelesen hat
-(nach jedem Schreiben), und close() beim Trennen.
+Wide windows (WIDE logical pixels or more) show switches and pedals side by
+side, tempo/program number in the header, no tabs; narrow windows use tabs.
+The editor calls refresh() after rereading assignments (after each write)
+and close() on disconnect.
 
-FootBar: die zugeklappte Form an derselben Stelle - drei flache Schalter wie auf dem
-Display des MX5 (Text und Farbe aus FootSwitchText/FootSwitchColour, ein nicht
-leuchtender Schalter ist abgedunkelt), Klick = Druck auf den Schalter am Geraet
-(Editor.press_footswitch), rechts der Knopf "Zuweisen", der das Feld aufklappt.
+FootBar: collapsed form at the same location, with three flat switches like
+the MX5 display (FootSwitchText/FootSwitchColour; unlit switches are dimmed).
+Click to press a physical switch (Editor.press_footswitch); the Assign button
+on the right expands the panel.
 """
 import tkinter as tk
 
@@ -37,14 +36,14 @@ TABS = ["Footswitches", "Pedals", "Tempo"]
 
 
 def read_tempo(br):
-    """Tempo-Einstellungen des Rigs und die Programmnummer (Reiter Tempo)."""
+    """Rig tempo settings and program number (Tempo tab)."""
     r = br.get_many([TEMPO, TEMPO_MODE, L.RIGS + "/LoadedProgNum"])
     return {"tempo": r.get(TEMPO, {}), "mode": r.get(TEMPO_MODE, {}), "prog": r.get(L.RIGS + "/LoadedProgNum", {}),
             "modes": L._entries(br, TEMPO_MODE)}
 
 
 def scene_summary(slots):
-    """Kurzfassung einer Scene: Zahl der geschalteten Bloecke und Presets."""
+    """Scene summary: number of switched blocks and presets."""
     on = sum(1 for _, m, _ in slots if m == L.SCENE_ON)
     off = sum(1 for _, m, _ in slots if m == L.SCENE_OFF)
     pre = sum(1 for _, _, p in slots if p)
@@ -59,28 +58,28 @@ def scene_summary(slots):
 
 
 def state_name(d, state):
-    """Name eines Scene-Zustands: 'Scene A'/'Scene B' bei zwei Zustaenden, sonst 'Scene'."""
+    """Scene state name: 'Scene A'/'Scene B' for two states, otherwise 'Scene'."""
     states = int(d["states"].get("unnormalized", 1) or 1) if d["mode"].get("string") == "Scene" else 1
     return ("Scene A", "Scene B")[state - 1] if states == 2 else "Scene"
 
 
 def colour_path(n, state):
-    """Farb-Property eines Schalters (Toggle / Scene-Zustand 1) bzw. seines Zustands 2."""
+    """Color property for a switch (Toggle/scene state 1) or its second state."""
     return "%s/%sMacroColour%d" % (L.FSW, "State2" if state == 2 else "", n)
 
 
 class FootswitchTile(tk.Canvas):
-    """Kachel eines Fussschalters (siehe Modulkopf). Regionen: mode, states, label,
-    state <k>, toggle. Rueckruf panel.tile_click(n, kind, arg)."""
+    """Footswitch tile (see module docstring). Regions: mode, states, label,
+    state <k>, toggle. Callback: panel.tile_click(n, kind, arg)."""
     HEAD = 30
 
     def __init__(self, parent, n, panel):
         super().__init__(parent, bg=parent.cget("bg"), highlightthickness=0, cursor="hand2",
                          width=px(120), height=px(120))
         self.n, self.panel = n, panel
-        self.data, self.sel = None, None       # sel: 1 / 2 (Zustand) oder "toggle" oder None
+        self.data, self.sel = None, None       # sel: state 1/2, 'toggle', or None
         self.regions = []                       # (x1, y1, x2, y2, kind, arg)
-        self.entry = None                       # Eingabefeld beim Aendern der Beschriftung
+        self.entry = None                       # Entry field for editing the label
         self.bind("<Configure>", lambda e: self.redraw())
         self.bind("<Button-1>", self._click)
         self.bind("<Double-Button-1>", self._double)
@@ -90,7 +89,7 @@ class FootswitchTile(tk.Canvas):
         self.data, self.sel = d, sel
         self.redraw()
 
-    # ---- Zeichnen ----
+    # ---- Drawing ----
     def _pill(self, x, y, text, fill, fg, kind, arg=None, anchor="w"):
         tw, th = U.text_size(text, FONT_SMALL)
         w, h = tw + px(18), th + px(8)
@@ -102,7 +101,7 @@ class FootswitchTile(tk.Canvas):
         return w
 
     def _switch(self, x, y, states, kind):
-        """Breiter Schalter '1 | 2' (rechtsbuendig an x), die aktive Zahl ist hervorgehoben."""
+        """Wide '1 | 2' switch, right-aligned at x; highlight the active number."""
         cw, h = px(30), px(24)
         x -= 2 * cw
         U.rrect(self, x, y, 2 * cw, h, px(6), CARD_HI)
@@ -129,7 +128,7 @@ class FootswitchTile(tk.Canvas):
         scene = mode == "Scene"
         states = int(d["states"].get("unnormalized", 1) or 1) if scene else 1
         label = d["text"].get("string", "") or ""
-        # Kopfzeile: Modus-Pille, Beschriftung, Zustaende-Pille
+        # Header: mode pill, label, state-count pill
         y = px(6)
         self._pill(px(6), y, (mode.upper() if mode else "?") + "  ▾", CARD_HI, TEXT, "mode")
         if scene:
@@ -138,7 +137,7 @@ class FootswitchTile(tk.Canvas):
         name = label.upper() if label else "Footswitch %d" % L.fs_label(self.n)
         self.create_text(W / 2, ly, text=name, fill=TEXT if label else DIM, font=FONT_CARD_BIG)
         self.regions.append((px(6), px(self.HEAD), W - px(6), ly + px(12), "label", None))
-        # Koerper
+        # Body
         y0, y1 = ly + px(14), H - px(6)
         if scene:
             slots = d["scenes"]
@@ -174,7 +173,7 @@ class FootswitchTile(tk.Canvas):
                          justify="center", anchor="n")
         self.regions.append((x, y, x + w, y + h, kind, arg))
 
-    # ---- Maus ----
+    # ---- Mouse ----
     def _region(self, x, y):
         for x1, y1, x2, y2, kind, arg in self.regions:
             if x1 <= x <= x2 and y1 <= y <= y2:
@@ -196,7 +195,7 @@ class FootswitchTile(tk.Canvas):
         self.panel.tile_menu(self, e)
 
     def edit_label(self):
-        """Beschriftung direkt in der Kachel aendern (Enter uebernimmt, Escape bricht ab)."""
+        """Edit the label directly in the tile (Enter accepts, Escape cancels)."""
         if self.entry or not self.data:
             return
         ent = tk.Entry(self, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat", font=FONT_BOLD, justify="center")
@@ -220,7 +219,7 @@ class FootswitchTile(tk.Canvas):
 
 
 class FixedTile(tk.Canvas):
-    """Fest belegter Schalter (Pedalboard: Rig auf/ab, Looper, Tempo) an seinem Platz - nur Anzeige."""
+    """Fixed switch (Pedalboard: rig up/down, looper, tempo) in its device position; display only."""
     W = 64
 
     def __init__(self, parent, text):
@@ -238,23 +237,23 @@ class FixedTile(tk.Canvas):
 
 
 class FootBar(U.Panel):
-    """Zugeklapptes Hardware-Feld: die Fussschalter wie auf dem Display, rechts 'Zuweisen'. Angeordnet
-    wie am Geraet (live.DEV.layout): MX5 eine Reihe zu drei, Pedalboard zwei Reihen zu sechs, die fest
-    belegten Schalter (Rig auf/ab, Looper, Tempo) nur als schmale Anzeige an ihrer Stelle."""
+    """Collapsed Hardware panel: device-style footswitches and an Assign button.
+    Matches live.DEV.layout: MX5 has one row of three, Pedalboard two rows of six.
+    Fixed switches (rig up/down, looper, tempo) are narrow display-only placeholders."""
     HEIGHT = 58
-    SWITCH = 42      # Hoehe eines Schalters (logische Pixel), eine Reihe
-    SWITCH_ROWS = 36   # Hoehe je Reihe bei mehreren Reihen
+    SWITCH = 42      # Switch height in logical pixels for one row
+    SWITCH_ROWS = 36   # Row height when there are multiple rows
     ROW_GAP = 6
     GAP = 8
-    FIXED = 0.55     # Breite eines fest belegten Schalters relativ zu einem zuweisbaren
-    DARK = 0.28      # Farbanteil eines nicht leuchtenden Schalters
+    FIXED = 0.55     # Fixed switch width relative to an assignable switch
+    DARK = 0.28      # Color intensity of an unlit switch
 
     def __init__(self, editor, parent):
         super().__init__(parent, fill=PANEL, r=10, height=px(self.HEIGHT))
         self.ed = editor
         self.data = None          # {n: {text, colour, on}} (live.fs_display)
-        self.hover = None         # Nummer des Schalters unter der Maus
-        self.rows = None          # Reihenzahl, fuer die das Feld gerade ausgelegt ist
+        self.hover = None         # Number of the switch under the pointer
+        self.rows = None          # Number of rows in the current layout
         f = self.inner
         self.btn_assign = U.Btn(f, "Assign", command=editor.open_hardware, state="disabled")
         self.btn_assign.pack(side="right", padx=(px(12), px(4)))
@@ -268,7 +267,7 @@ class FootBar(U.Panel):
         self.relayout()
 
     def relayout(self):
-        """Hoehe an die Reihenzahl des verbundenen Geraets anpassen (nach dem Verbinden)."""
+        """Adjust height to the connected device's row count after connecting."""
         rows = len(L.DEV.layout)
         if rows == self.rows:
             return
@@ -286,7 +285,7 @@ class FootBar(U.Panel):
         self.redraw()
 
     def _cells(self):
-        """[(x, y, w, h, eintrag)] - eintrag = FootSwitch-Nummer oder Text eines fest belegten Schalters."""
+        """[(x, y, w, h, entry)]; entry is a FootSwitch number or fixed-switch label."""
         W, H = self.canvas.winfo_width(), self.canvas.winfo_height()
         rows = L.DEV.layout
         rh = (H - (len(rows) - 1) * px(self.ROW_GAP)) / len(rows)
@@ -327,7 +326,7 @@ class FootBar(U.Panel):
         if W < 20 or H < 10:
             return
         for x, y, w, h, n in self._cells():
-            if isinstance(n, str):   # fest belegt: nur wo er am Geraet sitzt
+            if isinstance(n, str):   # Fixed assignment: show only its physical device position
                 U.rrect(c, x, y, w, h, px(7), CARD_LO)
                 c.create_text(x + w / 2, y + h / 2, text=n, fill=DIM, font=FONT_SMALL)
                 continue
@@ -346,7 +345,7 @@ class FootBar(U.Panel):
                 fill, fg = CARD, MUTED
             outline = "#ffffff" if self.hover == n else None
             U.rrect(c, x, y, w, h, px(7), fill, outline, 1 if outline else 0)
-            # kleine LED links wie am Geraet: hell bei leuchtendem, dunkel bei abgedunkeltem Schalter
+            # Small LED at left, as on the device: bright when lit, dark when dimmed
             led = px(8)
             U.circle(c, x + px(12) + led / 2, y + h / 2, led,
                      U.blend(colour, "#ffffff", 0.35) if lit else U.blend(colour or CARD_HI, PANEL, 0.1))
@@ -357,17 +356,17 @@ class FootBar(U.Panel):
 
 
 class HardwarePanel(U.Panel):
-    """Feld 'Hardware' im Hauptfenster (unter dem Signalpfad)."""
+    """Main-window Hardware panel below the signal chain."""
     HEIGHT = 300
-    HEIGHT_TWO_ROWS = 440   # Pedalboard: acht Schalter in zwei Reihen
-    WIDE = 1180   # ab dieser Breite (logische Pixel) Fussschalter und Pedale nebeneinander
+    HEIGHT_TWO_ROWS = 440   # Pedalboard: eight assignable switches in two rows
+    WIDE = 1180   # Minimum logical width for side-by-side switches and pedals
 
     def __init__(self, editor, parent, tempo):
         super().__init__(parent, fill=PANEL, r=10,
                          height=px(self.HEIGHT if len(L.DEV.layout) == 1 else self.HEIGHT_TWO_ROWS))
         self.ed = editor
         self.tempo = tempo
-        self.sel = (L.FS_NUMBERS[0], 1)   # Schalter + Zustand, fuer den die Palette gilt
+        self.sel = (L.FS_NUMBERS[0], 1)   # Switch and state targeted by the palette
         self.pedal = 1
         self.tab = 0
         self.wide = None
@@ -376,7 +375,7 @@ class HardwarePanel(U.Panel):
         head.pack(fill="x", padx=px(6), pady=(px(8), px(2)))
         tk.Label(head, text="Hardware", bg=PANEL, fg=TEXT, font=FONT_BOLD).pack(side="left", padx=(0, px(14)))
         self.tabs = U.Segmented(head, TABS, 0, on_pick=self.show_tab, padx=10)
-        self.head_tempo = tk.Frame(head, bg=PANEL)   # breites Fenster: Tempo in der Kopfzeile
+        self.head_tempo = tk.Frame(head, bg=PANEL)   # Wide window: tempo in the header
         U.Btn(head, "✕", command=self.close, kind="ghost", padx=6, pady=0, font=(U.SANS, 12)).pack(side="right")
         self.lbl_info = tk.Label(head, text="", bg=PANEL, fg=DIM, font=FONT_SMALL)
         self.lbl_info.pack(side="right", padx=(0, px(10)))
@@ -387,7 +386,7 @@ class HardwarePanel(U.Panel):
         self.build()
 
     def _resized(self, e):
-        """Beim Wechsel zwischen breit und schmal neu aufbauen."""
+        """Rebuild when switching between wide and narrow layouts."""
         if self.wide is not None and (e.width >= px(self.WIDE)) != self.wide:
             self.build()
 
@@ -404,7 +403,7 @@ class HardwarePanel(U.Panel):
         self.build()
 
     def refresh(self):
-        """Nach neu gelesenen Zuweisungen den aktuellen Reiter neu aufbauen (Auswahl bleibt)."""
+        """Rebuild the current tab after rereading assignments, preserving selection."""
         if not self.winfo_exists():
             return
         self.build()
@@ -421,7 +420,7 @@ class HardwarePanel(U.Panel):
         if self.wide:
             self.fill_tempo_inline(self.head_tempo)
             self.head_tempo.pack(side="left", padx=(px(6), 0))
-            ped = tk.Frame(self.body, bg=PANEL)   # rechts so breit wie noetig, links der Rest
+            ped = tk.Frame(self.body, bg=PANEL)   # Right side gets its required width; left gets the remainder
             ped.pack(side="right", fill="y")
             tk.Frame(self.body, bg=U.LINE, width=1).pack(side="right", fill="y", padx=px(14), pady=px(4))
             fs = tk.Frame(self.body, bg=PANEL)
@@ -437,9 +436,9 @@ class HardwarePanel(U.Panel):
         else:
             self.fill_tempo(self.body)
 
-    # ---------------- Fussschalter ----------------
+    # ---------------- Footswitches ----------------
     def tile_sel(self, n):
-        """Markierung einer Kachel aus dem Editor-Zustand: Zustand 1/2 (Scene) oder 'toggle'."""
+        """Tile selection from editor state: 1/2 for a scene, or 'toggle'."""
         if self.ed.scene and self.ed.scene[0] == n:
             return self.ed.scene[1]
         if self.ed.assign == n:
@@ -450,12 +449,12 @@ class HardwarePanel(U.Panel):
         hw = self.hw
         tiles = tk.Frame(body, bg=PANEL)
         tiles.pack(fill="both", expand=True)
-        for r, items in enumerate(L.DEV.layout):   # Reihen und Plaetze wie am Geraet
+        for r, items in enumerate(L.DEV.layout):   # Rows and positions match the device
             row = tk.Frame(tiles, bg=PANEL)
             row.pack(fill="both", expand=True, pady=(px(6) if r else 0, 0))
             for i, n in enumerate(items):
                 pad = (0, px(8) if i < len(items) - 1 else 0)
-                if isinstance(n, str):   # fest belegter Schalter: schmal, nur Anzeige
+                if isinstance(n, str):   # Fixed switch: narrow and display-only
                     FixedTile(row, n).pack(side="left", fill="y", padx=pad)
                     continue
                 t = FootswitchTile(row, n, self)
@@ -538,10 +537,10 @@ class HardwarePanel(U.Panel):
             if name in colours:
                 self.ed.hw_set(colour_path(n, state), "index", colours.index(name), reload=True)
 
-    # ---------------- Pedale ----------------
+    # ---------------- Pedals ----------------
     def fill_pedal(self, body, compact=False):
-        """Pedal-Zuweisungen; compact = Wahl von Pedal und Modus in einer Kopfzeile ueber den
-        vier Zeilen (breites Fenster, rechte Spalte), sonst links daneben mit Hinweisen."""
+        """Pedal assignments. compact puts pedal/mode selection in a header above
+        four rows (wide window, right column); otherwise place it at left with hints."""
         hw = self.hw
         if compact:
             left = tk.Frame(body, bg=PANEL)
@@ -590,7 +589,7 @@ class HardwarePanel(U.Panel):
             if not active:
                 tk.Label(card, text="(Advanced mode only)", bg=PANEL, fg=DIM, font=FONT_SMALL).pack(side="left")
                 continue
-            # Blocknamen wie im Editor (NAM statt Anxiety OD); die Auswahl geht ueber den Index
+            # Editor block names (NAM instead of Anxiety OD); selection uses the index
             shown = dict(r["module"], string=self.ed.block_title(r["module"].get("string", "")))
             self.combo(card, shown, [self.ed.block_title(x) for x in r["modules"]],
                        lambda ix, i=i: self.ed.hw_set("%s/ModuleList%d" % (base, i), "index", ix),
@@ -616,9 +615,9 @@ class HardwarePanel(U.Panel):
         self.pedal = i + 1
         self.build()
 
-    # ---------------- Reiter Tempo ----------------
+    # ---------------- Tempo tab ----------------
     def fill_tempo_inline(self, parent):
-        """Tempo und Programmnummer in einer Zeile (Kopfzeile bei breitem Fenster)."""
+        """Tempo and program number in one line (header in wide windows)."""
         modes = self.tempo.get("modes") or ["Fixed", "Current"]
         cur = self.tempo.get("mode", {}).get("string", "")
         tk.Label(parent, text="TEMPO", bg=PANEL, fg=MUTED, font=FONT_TINY).pack(side="left", padx=(0, px(6)))
@@ -666,7 +665,7 @@ class HardwarePanel(U.Panel):
             return
         self.ed.hw_set(TEMPO, "unnormalized", v, reload=False)
 
-    # ---------------- Hilfen ----------------
+    # ---------------- Helpers ----------------
     def row_label(self, parent, text, row):
         tk.Label(parent, text=text, bg=parent.cget("bg"), fg=TEXT, font=FONT, anchor="w").grid(
             row=row, column=0, sticky="w", padx=(0, px(10)), pady=px(3))

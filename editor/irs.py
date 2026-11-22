@@ -1,20 +1,20 @@
-"""irs.py - Dialog "Impulse Responses": IR-Datei fuer einen IR-Block waehlen und die
-IR-Dateien des Geraets verwalten (hochladen, herunterladen, umbenennen, loeschen,
-Ordner anlegen) - ohne USB-Transfermodus, ueber die Dateifunktionen der Bruecke 0.3.
+"""irs.py: select an IR file for a block and manage device impulse responses
+(upload, download, rename, delete, create folders) without USB Transfer mode,
+using bridge 0.3 file operations.
 
-Links die Ordner, rechts die Dateien des gewaehlten Ordners (wie am Geraet: Folder /
-IR File). Darunter Ordner und Name als Eingabefelder, damit sich auch eine IR eintragen
-laesst, die der Editor nicht kennt (offline ohne Export-Ordner). Die Auswahl fuer einen Block
-(IRDialog) ist eine Ebene ueber dem Fenster (ui.Overlay wie der Tuner), die Verwaltung (IRPage,
-Leiste "IRs") eine eigene Seite wie der Setlist-Manager; beide nicht modal: Geraeteaktionen laufen ueber
-editor.run_job, Rueckfragen legen sich als weitere Ebene darueber. Nach Aenderungen an den Dateien
-muss die Geraete-App neu starten (das MX5 liest den Dateibaum nur beim Start) - der
-Editor stoesst das beim Schliessen bzw. vor dem Uebernehmen an (ir_dialog_done).
+Folders are on the left, files in the selected folder on the right (matching
+the device's Folder/IR File). Folder/name entry fields below also accept IRs
+unknown to the editor, such as offline without an export folder. IRDialog is
+an overlay (ui.Overlay, like the tuner); IRPage is a dedicated management page
+(IRs sidebar, like the setlist manager). Neither is modal: device actions use
+editor.run_job and confirmations appear as further overlays. File changes
+require a device app restart: MX5 scans the file tree only at startup.
+The editor restarts on close or before applying (ir_dialog_done).
 
-Probehoeren (Einstellung "audition", nur live): ein Klick auf eine Datei setzt sie sofort im Block,
-der Dialog bleibt offen; "Done"/x behaelt die gerade gehoerte IR, "Revert" setzt die IR vom Oeffnen
-zurueck. Sind Dateien geaendert, kennt das Geraet sie erst nach dem Neustart - dann wird die
-Auswahl wie bisher erst beim Schliessen (nach dem Neustart) gesetzt.
+Audition (live only): clicking a file immediately selects it in the block
+without closing. Done/x retains the auditioned IR; Revert restores the IR
+selected on opening. After file changes, the device must restart before it
+can recognize them, so selection is applied only on close after that restart.
 """
 import os, tkinter as tk
 from tkinter import ttk, filedialog
@@ -23,34 +23,34 @@ import live as L
 import ui as U
 from ui import PANEL, CARD, ACCENT, ACCENT_TXT, TEXT, MUTED, px
 from ui import FONT, FONT_SMALL
-from ui import messagebox   # Meldungen als Overlay im Stil der Oberflaeche
+from ui import messagebox   # Messages use overlays matching the UI
 
 
 class _IRView:
-    """Inhalt und Logik, gemeinsam fuer IRDialog (Auswahl als Overlay) und IRPage (Verwaltung als
-    eigene Seite). irs: Ergebnis von live.db_irs / live.read_ir_folder. current: IR-Text des Blocks.
-    on_pick(folder, name): Auswahl uebernehmen (None = nur verwalten). manage: Dateien
-    aendern erlaubt (live, Bruecke 0.3)."""
+    """Shared content/logic for IRDialog (selection overlay) and IRPage (management
+    page). irs: live.db_irs/live.read_ir_folder result; current: block IR text.
+    on_pick(folder, name) applies selection (None means management only).
+    manage allows file changes (live, bridge 0.3)."""
 
-    WHERE = "dialog"   # fuer Hinweise: "... when this dialog/page closes"
+    WHERE = "dialog"   # For hints: '... when this dialog/page closes'
 
     def _init_view(self, editor, irs, current, on_pick, manage, audition):
         self.audition = bool(audition and on_pick)
-        self.original = L.parse_ir(current or "")   # (Ordner, Name) beim Oeffnen, fuer "Revert"
-        self.heard = None                           # zuletzt probegehoerte (Ordner, Name)
+        self.original = L.parse_ir(current or "")   # (folder, name) on opening, for Revert
+        self.heard = None                           # Last auditioned (folder, name)
         self.ed = editor
         self.closed = False
         self.irs = irs
         self.on_pick = on_pick
         self.manage = manage
-        self.changed = False          # Dateien geaendert -> Neustart der Geraete-App noetig
-        self.pick_args = None         # (Ordner, Name) nach Uebernehmen; der Editor setzt die IR
+        self.changed = False          # Changed files require a device app restart
+        self.pick_args = None         # (folder, name) after Apply; the editor selects the IR
         self.var_folder = tk.StringVar()
         self.var_name = tk.StringVar()
         self.filter = tk.StringVar()
         self.filter.trace_add("write", lambda *_: self.fill_files())
         self.folder = None
-        self.loading = None           # ui.Loading, solange irs noch vom Geraet kommt (irs=None)
+        self.loading = None           # ui.Loading while awaiting device IR list (irs=None)
         if irs is None:
             self.irs = {"folders": [], "files": {}}
         self.build()
@@ -63,17 +63,17 @@ class _IRView:
             self.lbl_info.configure(text="")
         else:
             self.fill_folders(d if d in self.irs["folders"] else None, n)
-        self.bind_keys()   # Escape auch in Eingabefeldern und Listen
-        if self.audition:  # Pfeiltasten blaettern durch die Dateien und laden sie
+        self.bind_keys()   # Escape also works in entry fields and lists
+        if self.audition:  # Arrow keys browse files and load them
             self.lb_files.focus_set()
 
     def loaded(self, irs):
-        """Die IR-Liste ist da (die Seite/der Dialog war schon mit Ladehinweis offen)."""
+        """IR list arrived after the page/dialog opened with a loading indicator."""
         if self.closed or not self.winfo_exists():
             return
         self.irs = irs
         d, n = self.original
-        if self.var_folder.get().strip():   # inzwischen getippt oder vom Block
+        if self.var_folder.get().strip():   # Typed meanwhile or supplied by the block
             d, n = self.var_folder.get().strip(), self.var_name.get().strip()
         self.fill_folders(d if d in irs["folders"] else None, n)
         if self.loading is not None:
@@ -87,7 +87,7 @@ class _IRView:
             self.loading.fail(text)
 
     def title(self):
-        return self._title   # fuer Rueckfragen (wie Toplevel.title())
+        return self._title   # For confirmations (like Toplevel.title())
 
     def cancel(self):
         self.close()
@@ -99,7 +99,7 @@ class _IRView:
         self.ed.ir_dialog_done(self)
         super().close(result)
 
-    # ---------------- Aufbau ----------------
+    # ---------------- Layout ----------------
     def build(self):
         b = self.body
         self.lbl_info = tk.Label(b, text="", bg=PANEL, fg=MUTED, font=FONT_SMALL, anchor="w")
@@ -124,7 +124,7 @@ class _IRView:
             self.lb_files.bind("<Return>", lambda e: self.close())
         elif self.on_pick:
             self.lb_files.bind("<Double-Button-1>", lambda e: self.apply())
-        # Eingabefelder: Ordner / Name (auch fuer IRs, die der Editor nicht kennt)
+        # Folder/name entry fields also accept IRs unknown to the editor
         row = tk.Frame(b, bg=PANEL)
         row.pack(fill="x", pady=(px(10), 0))
         tk.Label(row, text="Folder", bg=PANEL, fg=MUTED, font=FONT_SMALL).pack(side="left")
@@ -132,9 +132,9 @@ class _IRView:
         tk.Label(row, text="Name", bg=PANEL, fg=MUTED, font=FONT_SMALL).pack(side="left")
         e_name = U.Entry(row, textvariable=self.var_name, width=34, font=FONT_SMALL)
         e_name.pack(side="left", padx=(px(6), 0), fill="x", expand=True)
-        if self.audition:   # getippte IR: Enter laedt sie, ohne zu schliessen
+        if self.audition:   # Typed IR: Enter loads it without closing
             e_name.bind_entry("<Return>", lambda e: self.apply())
-        # Knoepfe
+        # Buttons
         bf = self.bf = tk.Frame(b, bg=PANEL)
         bf.pack(fill="x", side="bottom", pady=(px(12), 0))
         if self.audition:
@@ -157,7 +157,7 @@ class _IRView:
             self.btn_download = U.Btn(bf, "Download …", command=self.download, padx=10, pady=4, font=FONT_SMALL)
             self.btn_download.pack(side="left", padx=(px(6), 0))
         self.lbl_restart = tk.Label(b, text="", bg=PANEL, fg=ACCENT, font=FONT_SMALL, anchor="w", wraplength=px(760),
-                                    justify="left")   # erst bei einer Aenderung gezeigt (mark_changed)
+                                    justify="left")   # Shown only after a change (mark_changed)
 
     @staticmethod
     def _listbox(parent):
@@ -171,7 +171,7 @@ class _IRView:
         sb.pack(side="right", fill="y")
         return lb
 
-    # ---------------- Listen ----------------
+    # ---------------- Lists ----------------
     def set_irs(self, irs, folder=None, name=None):
         self.irs = irs
         self.fill_folders(folder or self.folder, name)
@@ -232,7 +232,7 @@ class _IRView:
         self.update_buttons()
 
     def selected_file(self):
-        """(Ordner, Name, Dateiname) der markierten Datei oder None."""
+        """(folder, name, filename) for the selected file, or None."""
         sel = self.lb_files.curselection()
         if not sel or not self.folder:
             return None
@@ -250,7 +250,7 @@ class _IRView:
 
     def mark_changed(self):
         self.changed = True
-        self.heard = None   # das Geraet kennt die geaenderten Dateien erst nach dem Neustart
+        self.heard = None   # The device recognizes changed files only after restarting
         if not self.winfo_exists():
             return
         if not self.lbl_restart.winfo_ismapped():
@@ -258,10 +258,10 @@ class _IRView:
         self.lbl_restart.configure(text="The MX5 reads its IR files only at startup: the device app is restarted "
                                         "when this %s closes (about 15 s)." % self.WHERE)
 
-    # ---------------- Auswahl ----------------
+    # ---------------- Selection ----------------
     def listen(self, folder, name):
-        """Probehoeren: IR sofort im Block setzen, der Dialog bleibt offen. Nach Dateiaenderungen
-        kennt das Geraet neue Dateien noch nicht - dann erst beim Schliessen (nach dem Neustart)."""
+        """Audition: immediately select the block IR without closing. After file
+        changes, new files are unknown until restart; apply on close afterwards."""
         if (folder, name) == self.heard:
             return
         self.heard = (folder, name)
@@ -275,7 +275,7 @@ class _IRView:
             self.btn_revert.configure(state="normal")
 
     def revert(self):
-        """Die IR vom Oeffnen wieder setzen und schliessen."""
+        """Restore the IR selected on opening and close."""
         d, n = self.original
         if d is None:
             return
@@ -298,15 +298,16 @@ class _IRView:
             self.heard = None
             self.listen(folder or L.IR_ROOT, name)
             return
-        self.pick_args = (folder or L.IR_ROOT, name)   # der Editor uebernimmt (nach dem Neustart, falls noetig)
+        self.pick_args = (folder or L.IR_ROOT, name)   # The editor applies it after restarting if needed
         self.close()
 
-    # ---------------- Verwalten ----------------
+    # ---------------- Management ----------------
     def device_job(self, fn, done, text, screen=None):
-        """Geraeteaktion ueber den Editor, die Dateien aendert, und im selben Auftrag danach die Liste
-        neu lesen (als zweiter Auftrag lief das Lesen oft noch, wenn der Dialog geschlossen wurde -
-        dann lehnte der Editor den Neustart ab). changed gilt ab dem Start: auch ein abgebrochener
-        Auftrag kann schon Dateien geaendert haben. screen: ProgressOverlay, zeigt das Ergebnis."""
+        """Run a file-changing device action through the editor, then reread the
+        list in the same job. With a separate read job, closing could occur while
+        it was still running, causing restart rejection. Mark changed at start:
+        even a cancelled job may have changed files. screen: ProgressOverlay
+        that displays the result."""
         if not self.ed.session or self.ed._job:
             if screen:
                 screen.close()
@@ -318,7 +319,7 @@ class _IRView:
             res, err = None, None
             try:
                 res = fn(br)
-            except Exception as e:   # Fehler melden, die Liste trotzdem lesen (ausser die Verbindung ist weg)
+            except Exception as e:   # Report errors but still reread the list, unless disconnected
                 if L.transport_error(e):
                     raise
                 err = str(e)
@@ -486,7 +487,7 @@ class _IRView:
 
 
 class IRDialog(_IRView, U.Overlay):
-    """IR-Auswahl eines Blocks als Ebene ueber dem Fenster (Knopf "Choose …" der IR-Zeile)."""
+    """Block IR selection overlay ('Choose ...' button in the IR row)."""
 
     def __init__(self, editor, irs, current=None, on_pick=None, manage=False, title=None, audition=False):
         self._title = title or ("Choose IR" if on_pick else "Manage impulse responses")
@@ -495,7 +496,7 @@ class IRDialog(_IRView, U.Overlay):
 
 
 class IRPage(_IRView, U.Page):
-    """IR-Dateien verwalten als eigene Seite an Stelle der Hauptansicht (Leiste "IRs")."""
+    """Dedicated IR management page replacing the main view (IRs sidebar)."""
 
     WHERE = "page"
 

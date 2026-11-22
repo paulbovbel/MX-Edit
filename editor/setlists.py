@@ -1,19 +1,17 @@
-"""setlists.py - Setlist-Manager des Editors (Bruecke 0.4).
+"""setlists.py: editor setlist manager (bridge 0.4).
 
-Eigene Ansicht an Stelle von Rig-Liste, Signalkette und Parameterfeld: links die Quelle
-(All Rigs oder eine andere Setlist), in der Mitte die bearbeitete Setlist in Baenken zu
-drei Rigs (so wie das Geraet sie auf die Fussschalter legt), rechts das gewaehlte Rig mit
-Name, Farbe und Programmnummer.
+Dedicated view replacing the rig list, chain and parameter panel: source
+(All Rigs/another setlist) at left; edited setlist in banks of three (matching
+MX5 switches) in the center; selected rig name/color/program at right.
 
-Bedienung: Rigs aus der Quelle in die Setlist ziehen (Doppelklick = anhaengen), in der
-Setlist verschieben, aus ihr heraus auf die Quelle ziehen (oder Entf) = entfernen.
-Strg/Umschalt-Klick waehlt mehrere Rigs, die zusammen gezogen bzw. gefaerbt werden.
+Drag source rigs into the setlist (double-click appends), reorder within it,
+or drag back to source/Delete to remove. Ctrl/Shift-click selects groups for
+dragging or coloring.
 
-Jede Aenderung geht sofort in die Datenbank (ein kurzer Schreibauftrag, ca. 80 ms, alle
-ueber den einen Worker der Sitzung, also in Reihenfolge). Das Geraet liest Listen aber nur
-beim Betreten neu und die Set-Auswahl nur beim App-Start - darum merkt sich der Manager,
-was betroffen ist (effects()), und der Editor frischt beim Schliessen einmal auf bzw.
-startet die App neu (Editor.close_setlists).
+Every change writes immediately (~80 ms) via the session's single ordered
+worker. Device lists update only on entry; setlist selection updates only at
+app startup. effects() records affected data so Editor.close_setlists can
+refresh once or restart on close.
 """
 import tkinter as tk
 from tkinter import ttk
@@ -24,11 +22,11 @@ from ui import BG, PANEL, CARD, CARD_HI, CARD_LO, ACCENT, ACCENT_TXT, TEXT, MUTE
 from ui import FONT, FONT_SMALL, FONT_BOLD, FONT_HEAD, FONT_TINY, messagebox
 
 MISSING = "– missing rig –"
-APP = U.APP_NAME   # Titel der Meldungen (wird im Overlay nicht angezeigt)
+APP = U.APP_NAME   # Message title, not displayed in the overlay
 
 
 def rig_colour(index):
-    """rigs.color (Index in RIG_COLOURS) -> Anzeigefarbe."""
+    """rigs.color index in RIG_COLOURS -> display color."""
     try:
         return COLOURS.get(L.RIG_COLOURS[int(index)], COLOURS["Off"])
     except (ValueError, TypeError, IndexError):
@@ -36,9 +34,9 @@ def rig_colour(index):
 
 
 class RigRows(tk.Canvas):
-    """Zeilenliste des Managers. items = [{id, name, colour, prog, mark}]. numbered=True:
-    die bearbeitete Setlist, mit Bank-Spalte links (je drei Rigs eine Bank).
-    Auswahl: Klick, Strg+Klick, Umschalt+Klick; Ziehen meldet sich beim Manager."""
+    """Manager row list. items=[{id,name,colour,prog,mark}]. numbered=True marks
+    the edited setlist, with bank column at left (three rigs per bank).
+    Select by click/Ctrl-click/Shift-click; dragging notifies the manager."""
 
     DRAG_PX = 6
 
@@ -51,10 +49,10 @@ class RigRows(tk.Canvas):
         self.sel = set()
         self.anchor = None
         self.hover = None
-        self.drop = None          # Einfuegeposition 0..n, solange etwas ueber diese Liste gezogen wird
-        self.drop_text = None     # ganze Liste als Ablage hervorheben (Text, z. B. 'entfernen')
+        self.drop = None          # Insertion position 0..n while dragging over this list
+        self.drop_text = None     # Highlight entire list as drop target with a label such as 'Remove'
         self.empty_text = ""
-        self._press = None        # (zeile, x, y, modifiziert)
+        self._press = None        # (row, x, y, modified)
         self._dragging = False
         self.configure(yscrollincrement=self.row)
         self.bind("<Configure>", lambda e: self.redraw())
@@ -66,13 +64,13 @@ class RigRows(tk.Canvas):
         self.bind("<Motion>", lambda e: self._set_hover(self.row_at(e.y)))
         self.bind("<Leave>", lambda e: self._set_hover(None))
 
-    # ---- Geometrie ----
+    # ---- Geometry ----
     def row_at(self, y):
         i = int(self.canvasy(y) // self.row)
         return i if 0 <= i < len(self.items) else None
 
     def insert_at(self, y_root):
-        """Einfuegeposition (0..n) fuer einen Bildschirmpunkt."""
+        """Insertion position 0..n for a screen point."""
         y = self.canvasy(y_root - self.winfo_rooty())
         return max(0, min(len(self.items), int((y + self.row / 2) // self.row)))
 
@@ -83,7 +81,7 @@ class RigRows(tk.Canvas):
     def scroll_wheel(self, step):
         self.yview_scroll(step, "units")
 
-    # ---- Maus ----
+    # ---- Mouse ----
     def _down(self, e):
         self.focus_set()
         i = self.row_at(e.y)
@@ -102,7 +100,7 @@ class RigRows(tk.Canvas):
         elif ctrl:
             self.set_selection(self.sel ^ {i})
             self.anchor = i
-        elif i not in self.sel:   # auf eine schon gewaehlte Zeile: erst beim Loslassen einzeln waehlen (Ziehen mehrerer)
+        elif i not in self.sel:   # Already-selected row: defer single selection until release, allowing group drag
             self.set_selection({i})
             self.anchor = i
         self.mgr.selected(self)
@@ -152,7 +150,7 @@ class RigRows(tk.Canvas):
             self.hover = i
             self.redraw()
 
-    # ---- Inhalt ----
+    # ---- Content ----
     def set_items(self, items, selection=None):
         self.items = list(items)
         if selection is not None:
@@ -185,7 +183,7 @@ class RigRows(tk.Canvas):
         w = max(self.winfo_width(), 2)
         R, G = self.row, self.gutter
         n = len(self.items)
-        if self.numbered:   # Baenke: abwechselnd hinterlegt, Banknummer mittig in der linken Spalte
+        if self.numbered:   # Alternating bank backgrounds; bank number centered in left column
             for b in range((n + 2) // 3):
                 y0, rows = b * 3 * R, min(3, n - b * 3)
                 if b % 2 == 0:
@@ -235,12 +233,12 @@ class RigRows(tk.Canvas):
             bw = U.text_size(self.drop_text, FONT_BOLD)[0] + px(32)
             U.rrect(self, w / 2 - bw / 2, y0 + h / 2 - px(20), bw, px(40), px(8), DANGER)
             self.create_text(w / 2, y0 + h / 2, text=self.drop_text, fill=TEXT, font=FONT_BOLD)
-        # mindestens so hoch wie die Flaeche, sonst laesst sich eine kurze Liste nach unten verschieben
+        # At least viewport height; otherwise a short list can scroll below its content
         self.configure(scrollregion=(0, 0, w, max(n * R, self.winfo_height(), 1)))
 
 
 def hint(parent, text):
-    """Grauer Hinweis am unteren Rand, bricht mit der Breite um."""
+    """Gray bottom hint, wrapped to available width."""
     lbl = tk.Label(parent, text=text, bg=PANEL, fg=DIM, font=FONT_SMALL, anchor="w", justify="left")
     lbl.pack(side="bottom", fill="x", padx=px(4), pady=(0, px(8)))
     lbl.bind("<Configure>", lambda e: lbl.configure(wraplength=max(50, e.width - px(4))))
@@ -248,7 +246,7 @@ def hint(parent, text):
 
 
 class SwatchGrid(tk.Canvas):
-    """Die 14 Rig-Farben als Kaestchen (7 x 2); on_pick(index in RIG_COLOURS)."""
+    """Fourteen rig colors as swatches (7 x 2); on_pick(RIG_COLOURS index)."""
 
     COLS = 7
 
@@ -296,40 +294,40 @@ class SwatchGrid(tk.Canvas):
             elif self.enabled and i == self.hover:
                 ring = MUTED
             U.rrect(self, x, y, self.s - px(4), self.s - px(4), px(6), col, ring, px(2) if ring else 0)
-            if name == "Off":   # "keine Farbe": diagonaler Strich
+            if name == "Off":   # No color: diagonal line
                 self.create_line(x + px(7), y + self.s - px(11), x + self.s - px(11), y + px(7),
                                  fill=MUTED if self.enabled else DIM, width=px(2))
 
 
 class SetlistManager(tk.Frame):
-    """Setlist-Manager (siehe Modulbeschreibung). ed = Editor (Sitzung, Statuszeile, Dialoge)."""
+    """Setlist manager (see module description); ed is Editor (session/status/dialogs)."""
 
     def __init__(self, ed, parent):
         super().__init__(parent, bg=BG)
         self.ed = ed
         self.rows = {}          # rig_id -> {id, name, color, prog_num}
-        self.all_ids = []       # All Rigs in Geraete-Reihenfolge
-        self.sets = []          # [(id, name)] nach Name
-        self.members = {}       # setlist_id -> [rig_id oder None]
-        self.target = None      # bearbeitete Setlist (id)
-        self.source = None      # Quelle: None = All Rigs, sonst setlist_id
-        self.src_view = []      # sichtbare Quellzeilen -> rig_id
-        self.focus_list = None  # Liste, deren Auswahl das Detailfeld zeigt
+        self.all_ids = []       # All Rigs in device order
+        self.sets = []          # [(id,name)] sorted by name
+        self.members = {}       # setlist_id -> [rig_id or None]
+        self.target = None      # Edited setlist ID
+        self.source = None      # Source: None for All Rigs, otherwise setlist_id
+        self.src_view = []      # Visible source rows -> rig_id
+        self.focus_list = None  # List whose selection is shown in the details panel
         self.undo_stack = []    # [(setlist_id, [rig_ids])]
-        self.pending = 0        # laufende Schreibauftraege
+        self.pending = 0        # Pending write jobs
         self.loaded = False
-        self._drag = None       # (Quellliste, [Indizes], [rig_ids])
+        self._drag = None       # (source list, [indices], [rig_ids])
         self._ghost = None
         self._scroll_job = None
         self._pointer = (0, 0)
-        # was beim Schliessen am Geraet aufzufrischen ist
+        # Device data to refresh on close
         self.fx_lists, self.fx_rows = set(), set()
         self.fx_renamed, self.fx_deleted, self.fx_created = {}, set(), set()
         self._build()
 
-    # ================= Aufbau =================
+    # ================= Layout =================
     def _build(self):
-        # Quelle (links)
+        # Source (left)
         lp = U.Panel(self, width=px(330))
         lp.pack(side="left", fill="y")
         lp.pack_propagate(False)
@@ -355,13 +353,13 @@ class SetlistManager(tk.Frame):
         self.src.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
-        # Detailfeld (rechts)
+        # Details (right)
         rp = U.Panel(self, width=px(340))
         rp.pack(side="right", fill="y", padx=(px(8), 0))
         rp.pack_propagate(False)
         self._build_details(rp.inner)
 
-        # bearbeitete Setlist (Mitte)
+        # Edited setlist (center)
         cp = U.Panel(self)
         cp.pack(side="left", fill="both", expand=True, padx=(px(8), 0))
         mid = cp.inner
@@ -391,7 +389,7 @@ class SetlistManager(tk.Frame):
         self.tgt.pack(side="left", fill="both", expand=True)
         tsb.pack(side="right", fill="y")
         self.src.empty_text = "Loading rigs …"
-        # geht sofort auf; bis die Datenbank gelesen ist, liegt der Ladehinweis ueber der Setlist
+        # Open immediately with a loading overlay until database data arrives
         self.loading = U.Loading(mid, "Loading rigs and setlists …")
         for w in (self.src, self.tgt):
             w.bind("<Delete>", lambda e: self.remove_selected())
@@ -452,9 +450,9 @@ class SetlistManager(tk.Frame):
         self.btn_action = U.Btn(b, "", command=self.detail_action)
         self.btn_action.pack(anchor="w")
 
-    # ================= Daten =================
+    # ================= Data =================
     def load(self, keep=True):
-        """Rigs, Setlists und Belegung aus der Datenbank lesen (ca. 0,5 s)."""
+        """Read rigs, setlists and assignments from the database (~0.5 s)."""
         def read(br):
             return {"rigs": L.db_rigs(br), "sets": L.db_setlists(br), "members": L.db_setlist_members(br)}
 
@@ -502,7 +500,7 @@ class SetlistManager(tk.Frame):
     def target_ids(self):
         return self.members.get(self.target, []) if self.target else []
 
-    # ================= Anzeige =================
+    # ================= Display =================
     def refresh_all(self):
         names = [n for _, n in self.sets]
         self.dd_target.set_values(names)
@@ -536,7 +534,7 @@ class SetlistManager(tk.Frame):
         self.lbl_src_count.configure(text="%d rigs" % len(self.src_view))
 
     def redraw_rows(self):
-        """Nach Aenderungen an Namen/Farben/Nummern beide Listen neu aufbauen, Auswahl bleibt."""
+        """Rebuild both lists after name/color/program changes, preserving selection."""
         self.fill_target(self.tgt.sel)
         self.fill_source()
         self.show_details()
@@ -568,7 +566,7 @@ class SetlistManager(tk.Frame):
         self.lbl_saving.configure(text="Saving …" if self.pending else "All changes saved",
                                   fg=ACCENT if self.pending else MUTED)
 
-    # ================= Auswahl und Detailfeld =================
+    # ================= Selection and details =================
     def selected(self, lst):
         self.focus_list = lst
         other = self.tgt if lst is self.src else self.src
@@ -649,9 +647,9 @@ class SetlistManager(tk.Frame):
         else:
             self.append_selected()
 
-    # ================= Schreiben =================
+    # ================= Writes =================
     def write(self, fn, text, done=None):
-        """fn(br) im Worker der Sitzung; bei Fehler Meldung und alles neu lesen."""
+        """Run fn(br) in the session worker; on error, report and reread everything."""
         if not self.ed.session:
             return
         self._saving(+1)
@@ -659,7 +657,7 @@ class SetlistManager(tk.Frame):
 
         def cb(res):
             failed = isinstance(res, dict) and res.get("ok") is False
-            if not self.winfo_exists():   # Manager schon geschlossen
+            if not self.winfo_exists():   # Manager already closed
                 if failed:
                     self.ed.status.set("%s failed: %s" % (text.rstrip(" …."), res.get("err")))
                 return
@@ -676,7 +674,7 @@ class SetlistManager(tk.Frame):
         self.ed.session.run(fn, cb)
 
     def set_order(self, ids, text, selection=None):
-        """Neue Reihenfolge der bearbeiteten Setlist: sofort anzeigen und schreiben."""
+        """New edited-setlist order: display and write immediately."""
         sid = self.target
         old = list(self.members.get(sid, []))
         if ids == old:
@@ -758,7 +756,7 @@ class SetlistManager(tk.Frame):
             lst.set_selection({i})
             self.append_selected()
 
-    # ---- Eigenschaften der Rigs (gelten ueberall, nicht nur in dieser Setlist) ----
+    # ---- Rig properties (global, not limited to this setlist) ----
     def apply_colour(self, c):
         ids = [r for r in self.sel_ids() if r in self.rows]
         ids = [r for r in ids if int(self.rows[r].get("color") or 0) != c]
@@ -791,7 +789,7 @@ class SetlistManager(tk.Frame):
             messagebox.showwarning(APP, "There is already a rig called “%s”." % name)
             return
         self.rows[rid]["name"] = name
-        # All Rigs sortiert nach Name wie das Geraet (Namensende hinter jedem Zeichen)
+        # All Rigs sorted by name as on device; end-of-name sorts after every character
         self.all_ids.sort(key=lambda r: self.rows[r]["name"] + "\x7f")
         self.fx_rows.add(rid)
         self.redraw_rows()
@@ -867,7 +865,7 @@ class SetlistManager(tk.Frame):
         new = sorted(ids, key=lambda r: (self.rows[r]["name"] + "\x7f") if r in self.rows else "￿")
         self.set_order(new, "Sorting “%s” by name …" % self.set_name(self.target))
 
-    # ---- Setlists (Anlegen/Umbenennen/Loeschen braucht beim Schliessen einen App-Neustart) ----
+    # ---- Setlists (create/rename/delete requires app restart on close) ----
     def _check_setlist_name(self, text, except_id=None):
         try:
             name = L.check_rig_name(text)
@@ -915,7 +913,7 @@ class SetlistManager(tk.Frame):
         if not name or name == self.set_name(sid):
             return
         self.sets = sorted([(s, name if s == sid else n) for s, n in self.sets], key=lambda s: s[1].lower())
-        if sid not in self.fx_created:   # neu angelegte stehen ohnehin mit dem neuen Namen in der Datenbank
+        if sid not in self.fx_created:   # Newly created setlists already have the new name in the database
             self.fx_renamed[sid] = name
         self.refresh_all()
         self.write(lambda br: L.rename_setlist(br, sid, name), "Renaming setlist to “%s” …" % name)
@@ -932,7 +930,7 @@ class SetlistManager(tk.Frame):
         self.sets = [(s, n) for s, n in self.sets if s != sid]
         self.members.pop(sid, None)
         self.undo_stack = [u for u in self.undo_stack if u[0] != sid]
-        if sid in self.fx_created:   # in dieser Sitzung angelegt und wieder geloescht: kein Neustart noetig
+        if sid in self.fx_created:   # Created and deleted in this session: no restart needed
             self.fx_created.discard(sid)
         else:
             self.fx_deleted.add(sid)
@@ -990,7 +988,7 @@ class SetlistManager(tk.Frame):
         self.ent_prog.focus_entry()
         self.ent_prog.select_all()
 
-    # ================= Ziehen und Ablegen =================
+    # ================= Drag and drop =================
     def drag_begin(self, lst, indices):
         view = self.src_view if lst is self.src else self.target_ids()
         ids = [view[i] for i in indices if i < len(view)]
@@ -1042,7 +1040,7 @@ class SetlistManager(tk.Frame):
             self._autoscroll()
 
     def _autoscroll(self):
-        """Beim Ziehen am oberen/unteren Rand der Setlist weiterblaettern."""
+        """Autoscroll near the top/bottom of the setlist while dragging."""
         self._scroll_job = None
         if not self._drag:
             return
@@ -1080,7 +1078,7 @@ class SetlistManager(tk.Frame):
         elif where == "source" and lst is self.tgt:
             self.remove_rows(indices)
 
-    # ================= Schliessen =================
+    # ================= Closing =================
     def effects(self):
         return {"lists": set(self.fx_lists), "rows": set(self.fx_rows), "renamed": dict(self.fx_renamed),
                 "deleted": set(self.fx_deleted),

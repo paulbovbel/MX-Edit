@@ -1,8 +1,8 @@
-"""settings.py - Einstellungen des Editors: ablegen in %APPDATA%\\MX5Editor\\einstellungen.json und
-die Seite "Settings" (ui.Overlay wie Tuner/IR-Dialog, ueber die Symbolleiste links).
+"""settings.py: editor preferences stored in %APPDATA%/MX5Editor/einstellungen.json,
+and the Settings overlay (ui.Overlay, like tuner/IR dialogs; left sidebar).
 
-Einstellungen sind ein flaches dict; unbekannte/fehlende Schluessel bekommen die Vorgaben aus
-DEFAULTS, eine kaputte Datei wird ignoriert (dann gelten die Vorgaben)."""
+Preferences are a flat dictionary. Unknown/missing keys use DEFAULTS;
+unreadable files are ignored and defaults apply."""
 import json, os, re, tkinter as tk
 
 import ui as U
@@ -10,17 +10,17 @@ from ui import PANEL, LINE, TEXT, MUTED, DIM, px
 from ui import FONT_BOLD, FONT_SMALL
 
 DEFAULTS = {
-    # IR- und NAM-Auswahl: ein Klick laedt die Datei sofort, die Auswahl bleibt offen (Probehoeren)
+    # IR/NAM browsers: a click loads the file immediately and keeps the browser open (audition)
     "audition": True,
-    # Fussschalter-Leiste unter dem Signalpfad (live); aus = nur ueber das Menue 'Footswitches & pedals'
+    # Footswitch bar below the chain (live); when disabled, use 'Footswitches & pedals' in the menu
     "footswitch_bar": True,
-    # Groesse der Oberflaeche in Prozent zusaetzlich zur Windows-Skalierung (gilt ab dem naechsten Start)
+    # UI size percentage in addition to Windows scaling; takes effect after restart
     "ui_scale": 100,
-    # Ueberblenden von Dialogen, Menues und Seiten (ui.ghost_fade)
+    # Dialog, menu and page crossfades (ui.ghost_fade)
     "animations": True,
-    # beim Start ohne Ordner gleich mit dem MX5 verbinden
+    # Connect to MX5 immediately when starting without a folder
     "auto_connect": True,
-    # MIDI-Ports fest waehlen ("" = automatisch ueber die Namenssuche in bridge.py)
+    # Fixed MIDI ports (empty means automatic name matching in bridge.py)
     "midi_in": "",
     "midi_out": "",
 }
@@ -30,7 +30,7 @@ AUTO_PORT = "Automatic"
 
 
 def path():
-    """Windows %APPDATA%, macOS ~/Library/Application Support, Linux $XDG_CONFIG_HOME bzw. ~/.config."""
+    """Windows %APPDATA%, macOS ~/Library/Application Support, Linux $XDG_CONFIG_HOME or ~/.config."""
     if U.WIN:
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
     elif U.MAC:
@@ -67,9 +67,9 @@ def save(data):
         return str(e)
 
 
-# ---------------- MIDI-Ports ----------------
+# ---------------- MIDI ports ----------------
 def port_names():
-    """(Eingaenge, Ausgaenge) wie mido sie meldet; ohne mido zwei leere Listen."""
+    """(inputs, outputs) reported by mido; two empty lists if mido is unavailable."""
     try:
         import mido
         return mido.get_input_names(), mido.get_output_names()
@@ -78,12 +78,12 @@ def port_names():
 
 
 def _port_base(name):
-    # rtmidi haengt unter Windows eine laufende Nummer an ("HeadRush MX5 1"), die sich aendern kann
+    # Windows rtmidi appends a changeable index, e.g. 'HeadRush MX5 1'
     return re.sub(r"\s+\d+$", "", name)
 
 
 def pick_port(names, wanted):
-    """Gespeicherten Portnamen unter den vorhandenen finden: genau, sonst ohne die angehaengte Nummer."""
+    """Match a saved port exactly, falling back to a match without its trailing index."""
     if wanted in names:
         return wanted
     hits = [n for n in names if _port_base(n) == _port_base(wanted)]
@@ -93,7 +93,7 @@ def pick_port(names, wanted):
 
 
 def find_ports(want_in, want_out):
-    """(Eingang, Ausgang) fuer Bridge(): fest gewaehlte Ports aus den Einstellungen, der Rest automatisch."""
+    """(input, output) for Bridge(): fixed ports from preferences, remaining ports automatic."""
     from bridge import Bridge
     ins, outs = port_names()
     auto = None if (want_in and want_out) else Bridge.find_ports()
@@ -102,8 +102,8 @@ def find_ports(want_in, want_out):
 
 
 class SettingsDialog(U.Overlay):
-    """Seite 'Settings': jede Aenderung wird sofort gespeichert; Editor.pref_changed wendet sie an,
-    soweit das ohne Neustart geht."""
+    """Settings page: save every change immediately. Editor.pref_changed applies
+    changes that do not require a restart."""
 
     def __init__(self, editor):
         super().__init__(editor, "Settings", width=600, click_out=True)
@@ -167,13 +167,13 @@ class SettingsDialog(U.Overlay):
         U.Btn(bf, "Close", command=self.close, kind="primary").pack(side="right")
         self.bind_keys()
 
-    # ---- Aufbau ----
+    # ---- Layout ----
     def section(self, text):
         tk.Label(self.body, text=text, bg=PANEL, fg=MUTED, font=FONT_SMALL, anchor="w").pack(
             fill="x", pady=(px(4), px(6)))
 
     def row(self, label, text, control):
-        """Zeile mit Titel + Erklaerung links; control(frame) baut rechts das Bedienelement (oder None)."""
+        """Row with title/explanation at left; control(frame) builds the right control (or None)."""
         row = tk.Frame(self.body, bg=PANEL)
         row.pack(fill="x", pady=(0, px(10) if control else px(6)))
         if control:
@@ -187,7 +187,7 @@ class SettingsDialog(U.Overlay):
     def toggle(self, parent, key):
         return U.Toggle(parent, self.ed.prefs.get(key), command=lambda v: self.set(key, v), bg=PANEL)
 
-    # ---- Aenderungen ----
+    # ---- Changes ----
     def set(self, key, value):
         self.ed.prefs[key] = value
         err = save(self.ed.prefs)
@@ -204,12 +204,12 @@ class SettingsDialog(U.Overlay):
                                  "Takes effect the next time the editor starts (now %d %%)." % now)
 
     def open_ports(self, key):
-        """Liste der Ports erst beim Aufklappen lesen (Geraete koennen inzwischen dazugekommen sein)."""
+        """Read ports only when opening the list; devices may have been connected meanwhile."""
         ins, outs = port_names()
         names = ins if key == "midi_in" else outs
         cur = self.ed.prefs[key]
         if cur and cur not in names:
-            names = names + [cur]   # gespeicherter Port, gerade nicht angeschlossen
+            names = names + [cur]   # Saved port, currently disconnected
         self._ports = [""] + names
         self.dd_ports[key].show([AUTO_PORT] + names)
 

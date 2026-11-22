@@ -179,7 +179,7 @@ class TransportTests(unittest.TestCase):
                  ("NEON GLASS", "COPPER EDGE", "ORBITAL BLOOM", "VELVET RIOT", "OBSIDIAN TIGHT")]
         for path in paths:
             rid, status = import_rig_file(br, str(path))
-            self.assertEqual(status, "neu")
+            self.assertEqual(status, "new")
             content = fw.db.execute("select content from rigs where id=?", (rid,)).fetchone()[0]
             self.assertEqual(content, json.loads(path.read_text())["content"])
         self.assertEqual(fw.db.execute("select count(*) from rigs").fetchone()[0], 5)

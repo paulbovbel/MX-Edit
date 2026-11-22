@@ -1,12 +1,11 @@
-"""tuner.py - "Tuner" als Ebene ueber dem Editor (ui.Overlay, der Rest des Fensters wird
-unscharf): oeffnet die Tuner-Seite am MX5 und zeigt Note und Abweichung - nahezu ohne
-Verzoegerung, weil der Editor die beiden Werte ~30x pro Sekunde ueber die Bruecke abfragt
-(eine Abfrage dauert ~5 ms, das Geraet rechnet alle ~35 ms neu).
+"""tuner.py: Tuner overlay above the editor (ui.Overlay, blurred background).
+Opens the MX5 tuner and displays note/deviation with low latency: values are
+polled about 30 times per second (~5 ms per query; device updates ~35 ms).
 
-Solange der Tuner offen ist, setzt der Editor seine normale Abfrage aus (am Geraet laesst
-sich im Tuner ohnehin nichts bearbeiten). Schliessen (x, Escape, Klick daneben, "Tuner
-beenden") verlaesst den Tuner am Geraet; verlaesst das Geraet ihn selbst (Fussschalter),
-schliesst sich die Ebene. Mute und Kammerton werden direkt am Geraet gesetzt (TunerMuting, TunerRef).
+Normal editor polling pauses while tuning; the device cannot edit rigs then.
+Closing (x, Escape, outside click, Exit tuner) exits the device tuner.
+If the device exits via footswitch, close the overlay. Mute/reference pitch
+write directly to TunerMuting/TunerRef.
 """
 import time, tkinter as tk
 
@@ -15,32 +14,32 @@ import ui as U
 from ui import PANEL, CARD, LINE, ACCENT, TEXT, MUTED, DIM, px
 from ui import FONT_SMALL, FONT_BOLD
 
-TICK_MS = 8             # Pause zwischen zwei Abfragen (dazu ~5 ms Abfrage + Pump-Takt des Editors -> ~30 Bilder/s)
-SLOW_MS = 500           # Pause nach einem Fehler
-GRACE = 1.0             # s: eigene Mute/Kammerton-Aenderung nicht von der Abfrage ueberschreiben lassen
-RANGE = 50.0            # angezeigter Bereich in Cents (wie das Geraet: -50..+50)
+TICK_MS = 8             # Poll delay plus ~5 ms query/editor pump interval gives ~30 frames/s
+SLOW_MS = 500           # Delay after an error
+GRACE = 1.0             # Seconds: protect local mute/reference writes from stale poll updates
+RANGE = 50.0            # Displayed cents range, matching the device: -50..+50
 AMBER = "#f2b33d"
 SCALE_TXT = "#c9a227"
 
 
 class TunerDialog(U.Overlay):
-    """first: erste Ablesung (live.tuner_open). Der Editor haelt die Ebene in editor.tuner_dialog
-    und wird ueber editor.tuner_dialog_done(dlg, device_exited) vom Schliessen unterrichtet."""
+    """first: initial reading (live.tuner_open). Stored in editor.tuner_dialog;
+    notify editor.tuner_dialog_done(dlg, device_exited) on close."""
 
     def __init__(self, editor, first):
         super().__init__(editor, "Tuner", width=600, click_out=True)
         self.ed = editor
-        self.pending = False        # Abfrage unterwegs
+        self.pending = False        # Poll in progress
         self.closed = False
-        self.shown = 0.0            # geglaettete Nadelposition (Cents)
+        self.shown = 0.0            # Smoothed needle position in cents
         self.ref = first.get("ref") or 440
         self.mute = first.get("mute")
-        self._written = {}          # Pfad -> Zeit des eigenen Schreibzugriffs
+        self._written = {}          # Path -> time of local write
         self.build()
         self.show(first)
         self.after(TICK_MS, self.tick)
 
-    # ---------------- Aufbau ----------------
+    # ---------------- Layout ----------------
     def build(self):
         b = self.body
         b.configure(padx=px(6))
@@ -60,7 +59,7 @@ class TunerDialog(U.Overlay):
         tk.Label(mute, text="Mute output", bg=PANEL, fg=MUTED, font=FONT_SMALL).pack(side="left", padx=(0, px(8)))
         self.tg_mute = U.Toggle(mute, value=bool(self.mute), command=self.set_mute)
         self.tg_mute.pack(side="left")
-        # Kammerton
+        # Reference pitch
         ref = tk.Frame(row, bg=PANEL)
         ref.pack(side="left", padx=(px(28), 0))
         tk.Label(ref, text="Reference", bg=PANEL, fg=MUTED, font=FONT_SMALL).pack(side="left", padx=(0, px(8)))
@@ -68,7 +67,7 @@ class TunerDialog(U.Overlay):
         self.lbl_ref = tk.Label(ref, text="", bg=PANEL, fg=TEXT, font=FONT_BOLD, width=7)
         self.lbl_ref.pack(side="left")
         U.Btn(ref, "+", command=lambda: self.step_ref(1), padx=8, pady=2).pack(side="left")
-        # Beenden
+        # Exit
         U.Btn(row, "Close tuner", command=self.close, kind="primary").pack(side="right")
 
         self.lbl_hint = tk.Label(b, text="The tuner runs on the device; a footswitch there closes it as well.",
@@ -76,11 +75,11 @@ class TunerDialog(U.Overlay):
         self.lbl_hint.pack(fill="x", pady=(px(14), 0))
         self.show_ref()
 
-    # ---------------- Abfrage ----------------
+    # ---------------- Polling ----------------
     def tick(self):
         if self.closed or not self.winfo_exists():
             return
-        self.raise_()    # bleibt ueber allem, was der Editor inzwischen einblendet
+        self.raise_()    # Stay above anything the editor opens in the meantime
         s = self.ed.session
         if not s:
             self.close(quiet=True)
@@ -101,7 +100,7 @@ class TunerDialog(U.Overlay):
             self.after(SLOW_MS, self.tick)
             return
         if not info["active"]:
-            # Tuner am Geraet verlassen (Fussschalter) -> Fenster schliessen, nichts mehr senden
+            # Device tuner exited via footswitch: close without sending further commands
             self.close(device_exited=True)
             return
         self.show(info)
@@ -136,7 +135,7 @@ class TunerDialog(U.Overlay):
     def show_ref(self):
         self.lbl_ref.configure(text="%d Hz" % self.ref)
 
-    # ---------------- Anzeige ----------------
+    # ---------------- Display ----------------
     def draw(self, active=None):
         c = self.meter
         c.delete("all")
@@ -145,11 +144,11 @@ class TunerDialog(U.Overlay):
             return
         if active is None:
             active = self.lbl_note.cget("text") != "–"
-        m = px(28)                      # Rand
+        m = px(28)                      # Border
         x0, x1 = m, w - m
         y = h * 0.56
         mid = (x0 + x1) / 2
-        # Skala
+        # Scale
         c.create_line(x0, y, x1, y, fill=LINE, width=px(2))
         for k in range(-50, 51, 5):
             x = mid + (x1 - x0) * k / (2 * RANGE)
@@ -159,10 +158,10 @@ class TunerDialog(U.Overlay):
             if k in (-50, -25, 25, 50):
                 c.create_text(x, y + px(20), text="%+d" % k, fill=SCALE_TXT, font=FONT_SMALL)
         c.create_text(mid, y + px(20), text="0", fill=SCALE_TXT, font=FONT_SMALL)
-        # Toleranzfeld
+        # Tolerance band
         tol = (x1 - x0) * L.TUNER_OK / (2 * RANGE)
         c.create_rectangle(mid - tol, y - px(14), mid + tol, y + px(14), fill=CARD, outline="")
-        # Mittelmarke
+        # Center mark
         c.create_polygon(mid - px(7), y - px(30), mid + px(7), y - px(30), mid, y - px(18),
                          fill=ACCENT if active and abs(self.shown) < L.TUNER_OK else DIM, outline="")
         if not active:
@@ -171,12 +170,12 @@ class TunerDialog(U.Overlay):
         x = mid + (x1 - x0) * v / (2 * RANGE)
         good = abs(self.shown) < L.TUNER_OK
         col = ACCENT if good else AMBER
-        # Balken von der Mitte zur Nadel
+        # Bar from center to needle
         if abs(x - mid) > px(2):
             c.create_rectangle(min(mid, x), y - px(5), max(mid, x), y + px(5), fill=col, outline="", stipple="gray50")
         U.rrect(c, x - px(4), y - px(22), px(8), px(44), px(4), col)
 
-    # ---------------- Bedienung ----------------
+    # ---------------- Controls ----------------
     def set_mute(self, on):
         s = self.ed.session
         if not s:
@@ -198,7 +197,7 @@ class TunerDialog(U.Overlay):
         self.close()
 
     def close(self, device_exited=False, quiet=False):
-        """quiet: nur das Fenster schliessen (der Editor kuemmert sich selbst um das Geraet)."""
+        """quiet: close only the window; the editor handles the device itself."""
         if self.closed:
             return
         self.closed = True

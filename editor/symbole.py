@@ -1,30 +1,30 @@
-"""symbole.py - Flache 2D-Symbole fuer alle Modelle des MX5 (Amps, Boxen, Effekte).
+"""symbole.py: flat 2D icons for every MX5 model (amps, cabinets, effects).
 
-Jedes Modell bekommt eine kleine Beschreibung (Form + Farben + Details), die
-mit Pillow gezeichnet wird. Die Formen sind an die Produktbilder der
-HeadRush-Website angelehnt (werkzeuge/symbole_laden.py laedt sie als Vorlage),
-aber bewusst reduziert: nur Flaechen, keine Verlaeufe, damit das Original
-trotzdem erkennbar bleibt (Tweed-Fender, Blackface, Plexi, Boss-Treter, ...).
+Each model has a small description (shape, colors, details) drawn with Pillow.
+Shapes are inspired by HeadRush website product images (downloaded as reference
+by werkzeuge/symbole_laden.py), but deliberately simplified: flat colors, no
+gradients, while keeping originals recognizable (Tweed Fender, Blackface,
+Plexi, Boss pedals, etc.).
 
-Formen:
-  head   Amp-Kopf (breit): Gehaeuse, Bedienfeld oben/unten/ganzflaechig, Bespannung, Knoepfe
-  combo  Combo/Box mit Bedienfeld oben und Lautsprechern
-  cab    Box ohne Bedienfeld (optional schraeg = Marshall-Slant)
-  pedal  Bodentreter (hochkant); Varianten wide, big, boss (dunkle Trittplatte)
-  round  runder Treter (Fuzz Face)
-  drop   HeadRush-Tropfenform (Ambi Verb, Reso Delay)
-  rack   19"-Geraet (flach)
-  wah    Wippe hochkant (Wah, Volume)
-  wham   Wippe breit mit Platte (Whammy)
-  jack / mix   Werkzeuge (FX-Loop, Mix)
+Shapes:
+  head: wide amp head, enclosure, top/bottom/full panel, grille, knobs
+  combo: combo/cab with top control panel and speakers
+  cab: cabinet without controls, optional Marshall-style slant
+  pedal: portrait stompbox; wide, big, boss (dark footplate) variants
+  round: round pedal (Fuzz Face)
+  drop: HeadRush teardrop shape (Ambi Verb, Reso Delay)
+  rack: shallow 19-inch unit
+  wah: portrait rocker pedal (wah/volume)
+  wham: wide rocker with plate (Whammy)
+  jack / mix: utility tools (FX loop/mix)
 
-zeichnen(dr, W, H, look) malt in ein W x H grosses Bild (Seitenverhaeltnis 10:7).
-look_for(name, model) sucht die Beschreibung zu einem Blocknamen (+ Amp-/Cab-Modell).
+zeichnen(dr, W, H, look) draws in a W x H image (10:7 aspect ratio).
+look_for(name, model) finds a description for a block and optional amp/cab model.
 """
 
 import math
 
-# ---------------- Farben (flach) ----------------
+# ---------------- Flat colors ----------------
 BLACK = "#141416"
 PANEL_BLK = "#101012"
 GOLD = "#c9a24a"
@@ -46,7 +46,7 @@ FOOT = "#c8c9cc"
 FOOT_EDGE = "#3a3b40"
 OUTLINE = "#0a0a0c"
 
-# Gemeinsame Bausteine
+# Shared building blocks
 BLACKFACE = dict(form="head", body="#1c1c1f", panel=PANEL_BLK, panel_pos="top", knob=KNOB_SLV, grille=SILVER_CLOTH,
                  tex="lines", logo=LOGO_WHT)
 PLEXI = dict(form="head", body=BLACK, panel=GOLD, panel_pos="bottom", knob=KNOB_BLK, grille="#1f1f22", logo=LOGO_WHT)
@@ -60,7 +60,7 @@ def _d(base, **kw):
     return d
 
 
-# ---------------- Amp-Modelle (Amp/Type) ----------------
+# ---------------- Amp models (Amp/Type) ----------------
 AMPS = {
     "59 tweed bass": dict(form="head", body=TWEED, panel=CHROME, panel_pos="bottom", knob=KNOB_BLK, grille=TWEED,
                           tex="weave", knobs=6),
@@ -151,7 +151,7 @@ AMPS = {
                                 hgt=26, led=LED_GRN, logo=LED_GRN),
 }
 
-# ---------------- Boxen (Cab/CabType) ----------------
+# ---------------- Cabinets (Cab/CabType) ----------------
 CABS = {
     "1x8 custom": dict(form="combo", body="#1a1a1c", panel=PANEL_BLK, knob=KNOB_SLV, knobs=3, grille=SILVER_CLOTH,
                        tex="lines", spk=1, w=44, h=42),
@@ -185,15 +185,15 @@ CABS = {
 }
 IR_LOOK = dict(form="cab", body=RACK, grille="#3a3b41", spk=0, w=50, h=54, wave="#1fc9a1")
 
-# ---------------- Effekt-Bloecke (Basisname) ----------------
+# ---------------- Effect blocks (base names) ----------------
 FX = {
     # Overdrive
     "green jrc-od": dict(form="pedal", body="#3f9a4a", knob=KNOB_BLK, knobs="3", plate="#cfd0d3"),
     "white boost": dict(form="pedal", body="#e6e6e8", knob=KNOB_BLK, knobs="4", led=LED_BLUE),
     "anxiety od": dict(form="pedal", body="#e8e8ea", knob=KNOB_BLK, knobs="2+1", sw=True),
     "anxiety od v2": dict(form="pedal", body="#dcdcdf", knob=KNOB_BLK, knobs="2+1", sw=True),
-    # NAM-Mod im Anxiety OD: Amp-Topteil (es ersetzt einen Amp), auf der Bespannung ein kleines
-    # neuronales Netz statt Stoff (Symbol ueber das Feld 'icon' der Kette, kein Blockname des Geraets)
+    # NAM replacing Anxiety OD: amp head (it replaces an amp), with a small neural
+    # network on the grille (chain 'icon' field, not a device block name)
     "nam": dict(form="nam", body="#1c2331", panel="#2b3548", grille="#0f141d", knob=KNOB_WHT, knobs=3,
                 net="#35d0c0", logo="#35d0c0", led="#35d0c0"),
     "s1 drive": _d(BOSS, body="#e2b33c", knobs="3"),
@@ -221,7 +221,7 @@ FX = {
     "ten freq eq": dict(form="pedal", body="#3a3b41", knobs="0", sliders=10, led=LED_RED),
     "para eq": _d(RACK_BLUE, knobs=9),
     "acoustic pre": dict(form="pedal", body="#e8e8ea", knob=KNOB_BLK, knobs="3", led=LED_GRN),
-    # Kompressor
+    # Compressor
     "gray comp": dict(form="pedal", body="#8c8d92", knob=KNOB_BLK, knobs="2"),
     "dyniii comp": _d(RACK_BLUE, knobs=6),
     "side comp": _d(RACK_BLUE, knobs=7),
@@ -281,16 +281,16 @@ FX = {
     "detune": dict(form="rack", body=RACK, knob=KNOB_SLV, knobs=8, screen="#d9443c"),
     "ring mod": dict(form="pedal", body="#1a1a1c", knob="#2a2a2e", knob_line="#8a8a8e", knobs="2+1", frame="#8a5a3a"),
     "feedback": dict(form="wham", body="#9a9ba0", plate=BLACK, label="#e8e8ea"),
-    # Volume / Dynamik
+    # Volume / Dynamics
     "volume": dict(form="wah", body="#1a1a1c", frame="#c9cacd"),
     "noise filter": dict(form="rack", body=RACK, knob=KNOB_SLV, knobs=6),
     "gate": dict(form="pedal", body="#2b6fb5", knob="#4fc3e8", knobs="3s", band=("#1a1a1c", 8, 20), led=LED_RED),
     "auto swell": dict(form="pedal", body="#3a3b41", knob="#e0e0e0", knobs="2+1", led=LED_RED),
-    # Werkzeuge
+    # Utilities
     "acoust sim": _d(BOSS, body="#f0b14a", knobs="3"),
     "fx-loop": dict(form="jack"),
     "mix": dict(form="mix"),
-    "chain": dict(form="mix"),      # Pseudo-Block "Parallelwege" des Editors
+    "chain": dict(form="mix"),      # Editor's 'Parallel paths' pseudo-block
 }
 GENERIC = dict(form="pedal", body="#4a4d56", knob=KNOB_BLK, knobs="2")
 
@@ -300,7 +300,7 @@ def _norm(n):
 
 
 def look_for(name, model=None):
-    """Beschreibung zu Block `name` (Basisname, z. B. 'Amp', 'Green JRC-OD') und ggf. Modell."""
+    """Description for block base name (e.g. 'Amp', 'Green JRC-OD') and optional model."""
     n = _norm(name)
     if n == "amp":
         return AMPS.get(_norm(model), _d(PLEXI, knobs=6))
@@ -311,9 +311,9 @@ def look_for(name, model=None):
     return FX.get(n, GENERIC)
 
 
-# ---------------- Zeichnen ----------------
+# ---------------- Drawing ----------------
 def zeichnen(dr, W, H, look):
-    """look in ein W x H grosses Bild malen (Einheiten: Breite = 100, Hoehe = 70)."""
+    """Draw look in a W x H image (logical units: width 100, height 70)."""
     u = W / 100.0
     form = look.get("form", "pedal")
     fn = {"head": _head, "combo": _cab, "cab": _cab, "pedal": _pedal, "round": _round, "drop": _drop,
@@ -323,7 +323,7 @@ def zeichnen(dr, W, H, look):
 
 
 class _Pen:
-    """Zeichenhilfe in Einheiten (0..100 x 0..70)."""
+    """Drawing helper in logical units (0..100 x 0..70)."""
 
     def __init__(self, dr, u):
         self.dr, self.u = dr, u
@@ -353,7 +353,7 @@ class _Pen:
         self.dr.polygon([(self.p(x), self.p(y)) for x, y in pts], fill=fill, outline=outline)
 
     def knob(self, cx, cy, d, fill, line=None):
-        """Drehknopf: Scheibe mit Zeiger."""
+        """Knob: disc with indicator."""
         self.ell(cx, cy, d, fill, outline=line or OUTLINE, width=0.8)
         mark = "#e8e8ea" if _dark(fill) else "#1a1a1a"
         self.line([(cx, cy), (cx - d * 0.18, cy - d * 0.34)], mark, width=max(0.8, d * 0.13))
@@ -363,7 +363,7 @@ class _Pen:
         self.ell(cx, cy, d * 0.45, "#9a9ba0")
 
     def texture(self, x0, y0, x1, y1, kind, base):
-        """Bespannung: feine Linien in leicht dunklerer Farbe."""
+        """Grille: fine lines in a slightly darker color."""
         col = _shade(base, 0.82)
         if kind == "lines":
             y = y0 + 1.5
@@ -371,7 +371,7 @@ class _Pen:
                 self.line([(x0, y), (x1, y)], col, width=0.5)
                 y += 2.2
         elif kind == "weave":
-            # Diagonalen in beide Richtungen, auf das Rechteck beschnitten
+            # Diagonals in both directions, clipped to the rectangle
             step = 3.0
             c = (y0 - x1) - step
             while c < y1 - x0:            # y - x = c
@@ -421,7 +421,7 @@ def _head(pen, L):
     y0 = 35 - hgt / 2.0
     y1 = 35 + hgt / 2.0
     body = L["body"]
-    # Griff und Gehaeuse
+    # Handle and enclosure
     pen.rect(38, y0 - 5, 62, y0 + 1, "#2a2b30", r=2)
     pen.rect(4, y0, 96, y1, body, r=4, outline=OUTLINE, width=0.8)
     pos = L.get("panel_pos", "bottom")
@@ -436,7 +436,7 @@ def _head(pen, L):
     else:
         px0, py0, px1, py1 = 4 + ins, y1 - ins - ph, 96 - ins, y1 - ins
         gz = (4 + ins, y0 + ins, 96 - ins, py0 - 2.5)
-    # Bespannung
+    # Grille
     if gz and L.get("grille"):
         gx0, gy0, gx1, gy1 = gz
         pen.rect(gx0, gy0, gx1, gy1, L["grille"], r=1.5)
@@ -447,9 +447,9 @@ def _head(pen, L):
             pen.rect(lx, gy0 + 2.5, lx + 14, gy0 + 6.5, L["logo"], r=1.5)
     elif L.get("logo") and pos == "mid":
         pen.rect(px0 + 3, py1 - 6, px0 + 17, py1 - 2.5, L["logo"], r=1.5)
-    elif L.get("logo") and gz:      # Gehaeusefarbe ohne Bespannung (Orange): Logo oben links
+    elif L.get("logo") and gz:      # Enclosure color without grille (Orange): logo at upper left
         pen.rect(gz[0] + 3, gz[1] + 2.5, gz[0] + 17, gz[1] + 6.5, L["logo"], r=1.5)
-    # Bedienfeld
+    # Control panel
     pen.rect(px0, py0, px1, py1, L["panel"], r=1.5)
     n = L.get("knobs", 6)
     d = 6.5 if n <= 6 else (5.2 if n <= 8 else 4.2)
@@ -466,8 +466,8 @@ def _head(pen, L):
 
 
 def _nam(pen, L):
-    """NAM-Block: Amp-Topteil (Bedienfeld unten: Model/Input/Output) mit einem kleinen
-    neuronalen Netz auf der Bespannung - erkennbar als Amp und als NAM."""
+    """NAM block: amp head (bottom Model/Input/Output panel), with a small neural
+    network on the grille, recognizable as both an amp and NAM."""
     _head(pen, dict(L, tex=None, logo=None, panel_pos="bottom"))
     hgt = L.get("hgt", 44)
     y0 = 35 - hgt / 2.0 + 3.5
@@ -482,7 +482,7 @@ def _nam(pen, L):
     for layer in pts:
         for x, y in layer:
             pen.ell(x, y, 2.6, col)
-    pen.rect(10, cy - 2, 21, cy + 2, L.get("logo", col), r=1.5)   # Logo-Plakette links
+    pen.rect(10, cy - 2, 21, cy + 2, L.get("logo", col), r=1.5)   # Logo badge on the left
 
 
 def _cab(pen, L):
@@ -491,7 +491,7 @@ def _cab(pen, L):
     y0, y1 = 35 - h / 2.0, 35 + h / 2.0
     body = L["body"]
     if L.get("slant"):
-        # schraege Oberkante (Marshall-Slant): Oberseite schmaler
+        # Slanted top edge (Marshall slant): narrower top
         pen.poly([(x0 + 4, y0), (x1 - 4, y0), (x1, y0 + 8), (x1, y1), (x0, y1), (x0, y0 + 8)], body, outline=OUTLINE)
         gy0 = y0 + 4
     else:
@@ -512,7 +512,7 @@ def _cab(pen, L):
     pen.rect(gx0, gy0, gx1, gy1, L["grille"], r=1.5)
     if L.get("tex"):
         pen.texture(gx0 + 0.5, gy0 + 0.5, gx1 - 0.5, gy1 - 0.5, L["tex"], L["grille"])
-    # Lautsprecher
+    # Speakers
     n = L.get("spk", 1)
     cols = {0: 1, 1: 1, 2: 2, 4: 2, 8: 2}[n]
     rows = max(1, n // cols)
@@ -610,7 +610,7 @@ def _pedal(pen, L):
 
 def _round(pen, L):
     pen.ell(50, 35, 62, L["body"], outline=OUTLINE, width=0.8)
-    # dunkler Keil unten (Fuzz-Face-"Laecheln")
+    # Dark wedge at the bottom (Fuzz Face 'smile')
     pen.dr.pieslice([pen.p(50 - 24), pen.p(35 - 24), pen.p(50 + 24), pen.p(35 + 24)], 30, 150, fill="#2a1a18")
     pen.knob(38, 22, 10, L.get("knob", KNOB_BLK))
     pen.knob(62, 22, 10, L.get("knob", KNOB_BLK))
@@ -644,7 +644,7 @@ def _drop(pen, L):
 def _rack(pen, L):
     body = L["body"]
     pen.rect(2, 26, 98, 44, body, r=1.5, outline=OUTLINE, width=0.8)
-    for x in (4, 94):   # Rackohren
+    for x in (4, 94):   # Rack ears
         pen.rect(x, 28, x + 2, 42, _shade(body, 0.6))
     kx0 = 10
     if L.get("screen"):
@@ -671,7 +671,7 @@ def _wah(pen, L):
         pen.poly([(34, 3), (66, 3), (71, 68), (29, 68)], body, outline=OUTLINE)
     if L.get("band"):
         pen.poly([(38, 7), (62, 7), (63, 14), (37, 14)], L["band"])
-    # Gummiauflage mit Rillen
+    # Grooved rubber footplate
     pad = _shade(body, 0.7) if not _dark(body) else "#2b2c31"
     top = 17 if L.get("band") else 9
     pen.poly([(39, top), (61, top), (65, 63), (35, 63)], pad)
@@ -688,7 +688,7 @@ def _wham(pen, L):
     plate = L.get("plate", BLACK)
     pen.rect(32, 8, 60, 64, plate, r=3)
     pen.rect(38, 14, 54, 58, L.get("label", "#e8e8ea"), r=2)
-    # Skala rechts, Regler unten rechts
+    # Scale on the right, knob at lower right
     pen.rect(67, 10, 73, 52, "#1a1a1c", r=1)
     for i in range(7):
         pen.line([(68.5, 14 + i * 5.5), (71.5, 14 + i * 5.5)], "#8a8a8e", width=0.6)
@@ -697,7 +697,7 @@ def _wham(pen, L):
 
 
 def _jack(pen, L):
-    # zwei Klinkenstecker (Send/Return)
+    # Two jack plugs (send/return)
     for cx, col in ((36, "#c9cacd"), (64, "#c9cacd")):
         pen.rect(cx - 2.5, 8, cx + 2.5, 34, col, r=1.2)
         pen.rect(cx - 5, 34, cx + 5, 62, "#3a3b41", r=3)

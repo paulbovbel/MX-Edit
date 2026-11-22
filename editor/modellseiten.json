@@ -1,5 +1,5 @@
 {
- "quelle": "MX5 Firmware 2.7, RedirCtrl/ParamName + ParamRedirected je Modell (werkzeuge/amp_seiten.py)",
+ "quelle": "MX5 Firmware 2.7, RedirCtrl/ParamName + ParamRedirected per model (werkzeuge/amp_seiten.py)",
  "Amp": {
   "59 Deluxe Gain Mod": [["Gain", "GainA"], ["Presence", "Presence"], ["Mast Vol", "Master"], ["Treble", "Treble"], ["Middle", "Mid"], ["Bass", "Bass"], ["Tremolo", "Tremolo"], ["Speed", "TremSpeed"], ["Depth", "TremDepth"], ["Sync", "TremSync"], ["Bright", "Bright"]],
   "59 Tweed Deluxe": [["Inst Vol", "GainA"], ["Mic Vol", "GainB"], ["Tone", "Treble"]],

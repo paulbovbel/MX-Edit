@@ -1,25 +1,24 @@
-"""rigmodel.py - Laden, Bearbeiten und Speichern von HeadRush-MX5-.rig-Dateien.
+"""rigmodel.py: load, edit and save HeadRush MX5 .rig files.
 
-Das Format ist ein JSON-Objekt, dessen Feld "content" einen weiteren JSON-Text
-mit dem serialisierten Eigenschaftsbaum enthaelt. Beide Ebenen schreibt das
-Geraet kompakt und mit sortierten Schluesseln; genau so wird hier gespeichert
-(fuer unveraenderte Dateien byte-identisch).
+The format is a JSON object whose 'content' field holds another JSON string
+containing the serialized property tree. Both layers are compact with sorted
+keys, exactly as written by the device (unchanged files are byte-identical).
 """
 import json, os, shutil, time, uuid
 
 
 def base_name(module):
-    """Basisname eines Blocks: 'Amp 2' -> 'Amp' (nur die Zweitinstanz mit einstelliger Endung,
-    'B Dist 7000' bleibt). Katalog, Presets, Modellbilder und Kategorien benutzen ihn."""
+    """Block base name: 'Amp 2' -> 'Amp' (only a one-digit instance suffix;
+    'B Dist 7000' stays unchanged). Used by catalogs, presets, model images and categories."""
     parts = module.rsplit(" ", 1)
     return parts[0] if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 1 else module
 
 SLOTS = 11
 EMPTY = "Empty Slot"
-# Knoten-Typen im Eigenschaftsbaum
+# Property tree node types
 T_NUMBER, T_BOOL, T_BOOL3, T_ENUM, T_TEXT = 0, 1, 3, 4, 8
 HIDDEN_PARAMS = {"PresetName", "PresetName2"}
-SPECIAL_MODULES = ["Rig", "Input", "Output"]  # immer vorhanden, nicht Teil der Kette
+SPECIAL_MODULES = ["Rig", "Input", "Output"]  # Always present, not part of the chain
 
 
 def _dump(obj):
@@ -43,13 +42,13 @@ class Rig:
             raise RigError("Not a valid rig file: %s (%s)" % (os.path.basename(path), e))
         self.dirty = False
 
-    # ---------- Lesen ----------
+    # ---------- Reading ----------
     @property
     def name(self):
         return self.node("Rig", "PresetName").get("string", "")
 
     def chain(self):
-        """Liste der Kettenplaetze [(platz, modulname oder None)]."""
+        """Chain slots as [(slot, module name or None)]."""
         ch = self.patch.get("Chain", {}).get("children", {})
         out = []
         for i in range(1, SLOTS + 1):
@@ -68,7 +67,7 @@ class Rig:
         return module in self.patch
 
     def params(self, module):
-        """Parameternamen in Geraete-Reihenfolge (ohne interne Namensfelder)."""
+        """Parameter names in device order, excluding internal name fields."""
         node = self.patch.get(module)
         if node is None:
             raise RigError("Module not in the rig: %s" % module)
@@ -104,7 +103,7 @@ class Rig:
         except RigError:
             return None
 
-    # ---------- Schreiben ----------
+    # ---------- Writing ----------
     def set_value(self, module, param, value):
         n = self.node(module, param)
         t = n.get("type")
@@ -131,14 +130,14 @@ class Rig:
         return changed
 
     def set_routing(self, name):
-        """Signalweg: 'S', 'SPS-1' oder 'PS-1'."""
+        """Signal routing: 'S', 'SPS-1' or 'PS-1'."""
         node = self.patch.setdefault("Chain", {}).setdefault("children", {}).setdefault("Routing", {"type": T_ENUM})
         self.dirty |= node.get("string") != name
         node["string"] = name
 
     def set_chain(self, names):
-        """Reihenfolge der Kette setzen: Liste mit Modulname oder None je Platz (die Module
-        selbst bleiben unter ihrem Namen erhalten, nur ModuleType1..11 aendern sich)."""
+        """Set chain order: module name or None per slot. Modules remain stored
+        under their names; only ModuleType1..11 change."""
         ch = self.patch.setdefault("Chain", {}).setdefault("children", {})
         for i, name in enumerate(names, start=1):
             node = ch.setdefault("ModuleType%d" % i, {"type": T_ENUM})
@@ -161,7 +160,7 @@ class Rig:
 
     def save(self, backup_dir=None):
         data = self.serialize()
-        # Sicherheitscheck: Ergebnis muss wieder ladbar sein
+        # Safety check: the result must remain loadable
         json.loads(json.loads(data)["content"])
         if backup_dir and os.path.exists(self.path):
             os.makedirs(backup_dir, exist_ok=True)
@@ -193,7 +192,7 @@ class Rig:
 
 
 class Catalog:
-    """Bekannte Wertebereiche und Auswahllisten, gesammelt aus Rigs/Block-Presets."""
+    """Known ranges and choices collected from rigs and block presets."""
 
     def __init__(self, path):
         self.modules = {}
@@ -203,7 +202,7 @@ class Catalog:
 
     @staticmethod
     def base(module):
-        return base_name(module)   # "Amp 2" nutzt denselben Katalogeintrag wie "Amp"
+        return base_name(module)   # 'Amp 2' shares the catalog entry for 'Amp'
 
     def param(self, module, param):
         m = self.modules.get(module) or self.modules.get(self.base(module)) or {}

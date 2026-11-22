@@ -1,34 +1,27 @@
-"""live.py - Live-Verbindung zum MX5 ueber die MX5 Bridge.
+"""live.py: live MX5 connection through MX5 Bridge.
 
-Alle Anfragen laufen in einem Hintergrund-Thread. Schreibanfragen auf denselben
-Parameter werden zusammengefasst (nur der letzte Wert wird gesendet), damit
-Regelbewegungen das Geraet nicht mit Nachrichten fluten. Ergebnisse werden
-ueber `dispatch` (z. B. tk.after) im GUI-Thread zugestellt.
+All requests run in a background thread. Writes to the same parameter are
+coalesced (only the latest value is sent) to avoid flooding the device when
+moving controls. Results reach the GUI thread via dispatch (e.g. tk.after).
+Requires bridge firmware 0.5 (database reads/writes and Unicode).
 
-Braucht die Brueckenfirmware 0.5 (Datenbank lesen und schreiben, Umlaute).
-
-Geraetefunktionen (am Geraet verifiziert):
-  Rig-Liste   Datenbankzeilen (db_rigs) in Geraete-Reihenfolge: All Rigs nach rowid,
-              Setlists nach setlist_rigs.show_order (geprueft 2026-09-30, 330 Rigs).
-              Ein Rig ist ueber seine ID bestimmt, Namen sind nicht eindeutig.
-  Rig laden   Ueber die Position: Bank anfahren (NextBank/PrevBank, die gezeigte Bank
-              RigName1-3 muss genau zur Liste passen), dann LoadRig1-3 "druecken";
-              schneller ueber ReceivePresetIndex = Programmnummer - 1 (nur Rigs der
-              aktiven Liste). Geprueft wird immer an der LoadedID.
-  Setlists    Set-Modus: SetName1 zeigt eine Setlist, NextSetBank/PrevSetBank
-              blaettern, AccessSet1 betritt die gezeigte Setlist (das MX5 laedt
-              dabei deren erstes Rig). AccessRigView wechselt zu "All Rigs",
-              ohne ein Rig zu laden. "All Rigs" steht nicht in der Set-Liste.
-  Dialoge     Fragt das MX5 nach ungespeicherten Aenderungen (Global Settings
-              "Confirm Dirty"), steht BoardMode auf "FreeText" und ButtonText1-3
-              auf Cancel|Save|Discard; die Buttons sind die Fussschalter FS1-3.
-              Verwerfen geht ohne Dialog: Rigs/Dirty = 0 vor dem Wechsel, dann
-              fragt das MX5 nicht (drop_changes; geprueft 2026-09-29, auch LoadRig
-              auf das geladene Rig laedt es dann frisch).
-  Speichern   EditModeSaveRig oeffnet den Dialog cancel|save|save_new_rig,
-              dessen Buttons an den Fussschaltern FS1|FS2|FS3 haengen.
-  Tastendruck state 1, mindestens 30 ms halten, state 0, danach mindestens
-              30 ms Pause - sonst wird ein Druck verschluckt oder doppelt gezaehlt.
+Device behavior verified on hardware:
+  Rig list: db_rigs returns device order: All Rigs by rowid, setlists by
+    setlist_rigs.show_order (2026-09-30, 330 rigs). IDs identify rigs; names
+    are not unique.
+  Loading: navigate NextBank/PrevBank until RigName1-3 matches the list, then
+    press LoadRig1-3. ReceivePresetIndex = program number - 1 is faster but
+    works only in the active list. Always verify LoadedID.
+  Setlists: SetName1 displays a setlist; NextSetBank/PrevSetBank navigate;
+    AccessSet1 enters it and loads its first rig. AccessRigView opens All Rigs
+    without loading. All Rigs is not itself in the setlist list.
+  Dialogs: with Confirm Dirty enabled, unsaved changes show BoardMode FreeText
+    and ButtonText1-3 Cancel|Save|Discard, mapped to FS1-3. Setting Rigs/Dirty=0
+    before switching avoids the prompt (drop_changes, verified 2026-09-29);
+    LoadRig also reloads the current rig from storage.
+  Saving: EditModeSaveRig opens cancel|save|save_new_rig, mapped to FS1|FS2|FS3.
+  Buttons: state 1, hold at least 30 ms, state 0, wait at least 30 ms;
+    otherwise presses may be lost or counted twice.
 """
 import base64, collections, json, os, threading, time
 from bridge import BridgeError, NoReply, sh_quote, sql_lit
@@ -51,50 +44,50 @@ SPECIAL_MODULES = ["Rig", "Input", "Output"]
 HIDDEN_PARAMS = {"PresetName", "PresetName2"}
 MAX_BANKS = 200
 MAX_SETLISTS = 50
-HOLD = 0.05           # Taste halten (gemessen: ab 30 ms zuverlaessig)
-BANK_WAIT = 0.05      # Pause nach dem Loslassen (unter 30 ms zaehlt der naechste Druck doppelt)
+HOLD = 0.05           # Button hold (reliable from 30 ms in tests)
+BANK_WAIT = 0.05      # Pause after release (under 30 ms the next press counts twice)
 LOAD_WAIT = 3.0
-SETTLE = 0.5          # nach dem Laden: Kette und Parameter fertig werden lassen. Mit 0,3 s
-                      # verschluckte das MX5 den ersten set danach in ~20 % der Faelle
-                      # (gemessen 30.09.2026: +0,1 s reichte schon, 0 von 30)
-RELOAD_WAIT = 0.4     # LoadRig auf das geladene Rig (ohne Dirty): gemessen 0,2 s bis zum frischen Stand
+SETTLE = 0.5          # After loading, let chain/parameters settle. At 0.3 s,
+                      # MX5 dropped the first subsequent set in ~20% of cases.
+                      # Measured 2026-09-30: adding 0.1 s was enough, 0 failures in 30.
+RELOAD_WAIT = 0.4     # LoadRig on current rig without Dirty: fresh state after ~0.2 s in tests
 
 
-# ---- Geraeteprofil ----
+# ---- Device profile ----
 #
-# Was sich zwischen MX5 und Pedalboard unterscheidet (Pedalboard aus den Diagnose-Logs vom
-# 11./13.10.2026, am Geraet selbst nie vom Editor gefahren - Beta):
-#   Baenke     MX5: RigName1-3, NextBank blaettert um 3. Pedalboard: RigName1-8 (zwei Reihen an
-#              FS2-5 und FS8-11), NextBank/PrevBank blaettern um 4 - die letzte Seite zeigte
-#              Platz 25-28 + 4x [EMPTY], Bank auf -> 21-28 (28 Rigs, Reihenfolge rowid wie am MX5).
-#   Schalter   MX5: FootSwitch5-7 an RawFootswitches/FS1-3. Pedalboard: FootSwitch1-8, in Stomp an
-#              FS2-5 (1-4) und FS8-11 (5-8); FS1/FS7 Rig auf/ab, FS6 Looper, FS12 Tempo.
-#   Dialoge    ButtonText<k> gehoert zum Schalter FS<k> (MX5 3, Pedalboard 12) - Knoepfe werden
-#              ueber ihre Beschriftung gesucht (dialog_press), nicht ueber feste Nummern.
-#   Setlists   Pedalboard-Setlists enthalten Songs (setlist_songs/setlist_song_rigs), setlist_rigs
-#              bleibt leer - der Editor nutzt dort nur All Rigs.
-#   Looper     AltLooperFS gibt es am Pedalboard nicht (eigene Looper-Schalter FS1-11).
+# MX5/Pedalboard differences (Pedalboard diagnosis logs from
+# 2026-10-11/13; editor not tested directly on that hardware, beta):
+#   Banks: MX5 RigName1-3, NextBank steps by 3. Pedalboard RigName1-8 (two rows on
+#     FS2-5 and FS8-11), NextBank/PrevBank step by 4; final page showed
+#     slots 25-28 plus four [EMPTY]; bank up showed 21-28 (28 rigs, rowid order like MX5).
+#   Switches: MX5 FootSwitch5-7 -> RawFootswitches/FS1-3. Pedalboard FootSwitch1-8 ->
+#     FS2-5 (1-4), FS8-11 (5-8) in Stomp; FS1/FS7 rig up/down, FS6 looper, FS12 tempo.
+#   Dialogs: ButtonText<k> maps to FS<k> (MX5: 3, Pedalboard: 12). Find buttons
+#     by label (dialog_press), not fixed numbers.
+#   Setlists: Pedalboard uses songs (setlist_songs/setlist_song_rigs); setlist_rigs
+#     stays empty, so the editor supports All Rigs only.
+#   Looper: Pedalboard has no AltLooperFS; dedicated looper switches FS1-11.
 class Device:
     def __init__(self, name, bank_show, bank_step, fs, raw, buttons, layout, setlists=True, alt_looper=True,
                  new_rig=True, beta=False):
         self.name = name
-        self.layout = layout         # Schalter wie am Geraet: Reihen (oben zuerst) aus FootSwitch-Nummern
-                                     # und Texten fuer fest belegte Schalter (nur Anzeige)
-        self.buttons = buttons       # Fussschalter mit Display-Text (ButtonText1..n = RawFootswitches/FS1..n)
-        self.bank_show = bank_show   # Rigs je Bank-Anzeige (RigName1..n, LoadRig1..n)
-        self.bank_step = bank_step   # Plaetze je NextBank/PrevBank
-        self.fs = fs                 # Nummern der zuweisbaren Fussschalter (FootSwitch<n>)
-        self.raw = raw               # {n: RawFootswitches-Nummer in der Stomp-Ansicht}
-        self.setlists = setlists     # Setlists aus setlist_rigs (False: nur All Rigs)
+        self.layout = layout         # Device switch layout: rows (top first) of FootSwitch numbers
+                                     # and labels for fixed switches (display only)
+        self.buttons = buttons       # Footswitches with display text (ButtonText1..n = RawFootswitches/FS1..n)
+        self.bank_show = bank_show   # Rigs per bank display (RigName1..n, LoadRig1..n)
+        self.bank_step = bank_step   # Slots advanced per NextBank/PrevBank
+        self.fs = fs                 # Assignable footswitch numbers (FootSwitch<n>)
+        self.raw = raw               # {n: RawFootswitches number in Stomp view}
+        self.setlists = setlists     # Setlists from setlist_rigs (False: All Rigs only)
         self.alt_looper = alt_looper
-        self.new_rig = new_rig       # blank_rig_content passt (Aufbau eines MX5-Rigs)
+        self.new_rig = new_rig       # blank_rig_content matches this device's rig structure
         self.beta = beta
 
 
 DEVICES = {
     "MX5": Device("MX5", 3, 3, (5, 6, 7), {5: 1, 6: 2, 7: 3}, 3, [[5, 6, 7]]),
-    # Pedalboard: zwei Reihen zu sechs, oben FS1-6, unten FS7-12 (Stomp: FS1 Rig auf, FS7 Rig ab,
-    # FS6 Looper, FS12 Tempo - Beschriftungen aus dem Diagnose-Log)
+    # Pedalboard: two rows of six, FS1-6 above FS7-12 (Stomp: FS1 rig up, FS7 rig down,
+    # FS6 looper, FS12 tempo; labels from diagnosis logs)
     "Pedalboard": Device("Pedalboard", 8, 4, tuple(range(1, 9)),
                          {n: n + 1 if n <= 4 else n + 3 for n in range(1, 9)}, 12,
                          [["Rig ↑", 1, 2, 3, 4, "Looper"], ["Rig ↓", 5, 6, 7, 8, "Tempo"]],
@@ -105,8 +98,8 @@ FS_NUMBERS = DEV.fs
 
 
 def set_device(model):
-    """Profil fuer das verbundene Geraet einstellen (None/unbekannt = MX5). Gilt fuer den ganzen
-    Prozess - der Editor ist immer nur mit einem Geraet verbunden."""
+    """Set the connected device profile (None/unknown = MX5). Process-wide:
+    the editor connects to only one device at a time."""
     global DEV, FS_NUMBERS
     DEV = DEVICES.get(model) or DEVICES["MX5"]
     FS_NUMBERS = DEV.fs
@@ -114,10 +107,10 @@ def set_device(model):
 
 
 def fs_label(n):
-    """Nummer, unter der der Schalter FootSwitch<n> angezeigt wird (MX5: 5-7 -> 1-3)."""
+    """Displayed number for FootSwitch<n> (MX5: 5-7 -> 1-3)."""
     return FS_NUMBERS.index(n) + 1 if n in FS_NUMBERS else n
 
-# Knotentypen im Live-Modus
+# Live-mode node types
 L_NUMBER, L_BOOL, L_ENUM, L_TEXT = "number", "bool", "enum", "text"
 
 
@@ -138,7 +131,7 @@ def kind_of(info):
 
 
 COMPACT_FIELDS = ("value", "unnormalized", "state", "index", "string")
-COMPACT_GROUP = 300   # Pfade je eval (~60 Zeichen Antwort je Wert, Grenze ~48 KB)
+COMPACT_GROUP = 300   # Paths per eval (~60 reply characters per value; ~48 KB limit)
 _COMPACT_JS = ('var P = %s, F = %s, o = []; '
                'function f(t, k) { try { var v = t[k], y = typeof v; '
                '  return y == "number" || y == "boolean" || y == "string" ? v : null; } catch (e) { return null; } } '
@@ -149,17 +142,17 @@ _COMPACT_JS = ('var P = %s, F = %s, o = []; '
 
 
 def get_compact(br, paths):
-    """Wie Bridge.get_many, aber nur die Felder COMPACT_FIELDS (ohne numEntries, maximum,
-    defaultValue, valueType, editable) - etwa ein Drittel der Antwort, fuer den laufenden Abgleich
-    (95 -> 55 ms bei 86 Werten). Fehlende Pfade -> {"ok": False}; wie bei infoOf fehlen Felder,
-    die das Property nicht hat. Die Werte also in vorhandene Eintraege einmischen, nicht ersetzen."""
+    """Like Bridge.get_many, but return only COMPACT_FIELDS (omit numEntries,
+    maximum, defaultValue, valueType, editable). About one-third the reply size
+    for polling (95 -> 55 ms for 86 values). Missing paths yield {'ok': False}.
+    As with infoOf, absent properties omit fields; merge values, do not replace entries."""
     paths = list(dict.fromkeys(paths))
     out = {}
     for i in range(0, len(paths), COMPACT_GROUP):
         group = paths[i:i + COMPACT_GROUP]
         for p, v in zip(group, json.loads(br.eval(_COMPACT_JS % (json.dumps(group), json.dumps(COMPACT_FIELDS))))):
             if not v:
-                out[p] = {"ok": False, "err": "keine Eigenschaft: " + p}
+                out[p] = {"ok": False, "err": "No property: " + p}
                 continue
             d = {"ok": True}
             for k, x in zip(COMPACT_FIELDS, v):
@@ -169,16 +162,16 @@ def get_compact(br, paths):
     return out
 
 
-LOST_PING = 1.0   # s: Ping nach einem Transportfehler; bleibt er aus, gilt die Verbindung als verloren
+LOST_PING = 1.0   # Seconds: ping after a transport error; no reply means connection lost
 
 
 def transport_error(e):
-    """True, wenn die Ausnahme auf eine gestoerte Verbindung deutet (keine/unvollstaendige Antwort,
-    MIDI-Port weg) - nicht bei Fehlermeldungen des Geraets oder des Editors (LiveError)."""
+    """True for connection failures (missing/incomplete reply or lost MIDI port),
+    not device/editor error messages (LiveError)."""
     if isinstance(e, LiveError):
         return False
     if isinstance(e, BridgeError):
-        return str(e).startswith(("Keine Antwort", "Antwort unvollstaendig", "MIDI-Port"))
+        return str(e).startswith(("No reply", "Incomplete reply", "MIDI port", "MIDI send failed"))
     return True
 
 
@@ -186,13 +179,13 @@ class LiveSession:
     def __init__(self, bridge, dispatch, on_lost=None):
         self.bridge = bridge
         self.dispatch = dispatch
-        self.on_lost = on_lost    # im GUI-Thread, einmal, wenn das Geraet nicht mehr antwortet
+        self.on_lost = on_lost    # Run once in GUI thread when the device stops responding
         self._cv = threading.Condition()
         self._sets = collections.OrderedDict()   # path -> (field, value, callback)
         self._jobs = collections.deque()          # (fn(bridge) -> result, callback)
         self._stop = False
-        self.lost = False         # Verbindung verloren: der Worker nimmt keine Auftraege mehr an
-        self.running = False      # ein Auftrag laeuft gerade auf der Bridge
+        self.lost = False         # Connection lost: worker no longer accepts jobs
+        self.running = False      # A job is currently using the bridge
         self.errors = 0
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -212,8 +205,8 @@ class LiveSession:
             return not self._sets and not self._jobs and not self.running
 
     def run(self, fn, callback=None):
-        """fn(bridge) im Hintergrund ausfuehren; callback(result) im GUI-Thread.
-        Wirft fn eine Ausnahme, bekommt callback ein {"ok": False, "err": ...}."""
+        """Run fn(bridge) in the background; invoke callback(result) in the GUI thread.
+        Exceptions from fn become callback({'ok': False, 'err': ...})."""
         with self._cv:
             self._jobs.append((fn, callback))
             self._cv.notify()
@@ -222,7 +215,7 @@ class LiveSession:
         self.run(lambda br: br.get(path), lambda r: callback(path, r))
 
     def get_many(self, paths, callback):
-        """callback(dict pfad -> info)"""
+        """callback(dict mapping paths to info)"""
         self.run(lambda br: br.get_many(paths), callback)
 
     def set(self, path, field, value, callback=None):
@@ -238,7 +231,7 @@ class LiveSession:
                     self._cv.wait()
                 if self._stop or self.lost:
                     return
-                if self._sets:  # Schreiben hat Vorrang
+                if self._sets:  # Writes take priority
                     path, (field, value, cb) = self._sets.popitem(last=False)
                     fn = lambda br, p=path, f=field, v=value: br.set(p, f, v)
                     cb = (lambda r, cb=cb, p=path: cb(p, r)) if cb else None
@@ -250,7 +243,7 @@ class LiveSession:
                 result = fn(self.bridge)
             except LiveError as e:
                 result = {"ok": False, "err": str(e)}
-            except Exception as e:  # der Worker darf nie sterben
+            except Exception as e:  # Never let the worker die
                 self.errors += 1
                 result = {"ok": False, "err": "%s: %s" % (type(e).__name__, e)}
                 broken = transport_error(e) and (isinstance(e, NoReply) or not self._alive())
@@ -265,7 +258,7 @@ class LiveSession:
                 return
 
     def _alive(self):
-        """Kurzer Ping nach einem Transportfehler: einzelne verlorene Antworten sind kein Abbruch."""
+        """Brief ping after a transport error; one lost reply does not mean disconnection."""
         try:
             self.bridge._drain()
             self.bridge.request(0x01, timeout=LOST_PING)
@@ -274,10 +267,10 @@ class LiveSession:
             return False
 
 
-# ---------------- Geraetefunktionen (laufen im Worker, bekommen die Bridge) ----------------
+# ---------------- Device operations (run in worker, receive bridge) ----------------
 
 def press(br, path, hold=HOLD, wait=BANK_WAIT):
-    """Taste 'druecken': state 1, kurz halten, state 0, kurze Pause."""
+    """Press a button: state 1, short hold, state 0, short pause."""
     br.set(path, "state", 1)
     time.sleep(hold)
     br.set(path, "state", 0)
@@ -285,7 +278,7 @@ def press(br, path, hold=HOLD, wait=BANK_WAIT):
 
 
 def strings(br, paths):
-    """Mehrere Textwerte lesen; eine unvollstaendige Antwort wird einmal wiederholt."""
+    """Read multiple text values; retry an incomplete reply once."""
     r = br.get_many(paths)
     if any(p not in r for p in paths):
         r = br.get_many(paths)
@@ -293,7 +286,7 @@ def strings(br, paths):
 
 
 def read_bank(br):
-    """Die Rigs der aktuell angezeigten Bank (MX5 drei, Pedalboard acht): [(name, farbe)]."""
+    """Current bank's rigs (MX5: three; Pedalboard: eight): [(name, color)]."""
     k = DEV.bank_show
     v = strings(br, ["%s/RigName%d" % (PC, n) for n in range(1, k + 1)] +
                 ["%s/RigColour%d" % (PC, n) for n in range(1, k + 1)])
@@ -301,9 +294,8 @@ def read_bank(br):
 
 
 def _step(br, path, read, before):
-    """Taste druecken und neu lesen. Aendert sich nichts, wird nach einer Pause
-    noch einmal gedrueckt (kurz nach einem Rig-Wechsel verschluckt das MX5
-    Tastendruecke). Liefert (geaendert, anzeige)."""
+    """Press and reread. If unchanged, pause and press once more (MX5 drops
+    presses immediately after a rig change). Return (changed, display)."""
     press(br, path)
     cur = read(br)
     if cur != before:
@@ -318,7 +310,7 @@ def _step(br, path, read, before):
 
 
 def _to_start(br, read, prev_path, limit):
-    """prev_path druecken, bis sich die Anzeige nicht mehr aendert; liefert den ersten Eintrag."""
+    """Press prev_path until the display stops changing; return the first entry."""
     cur = read(br)
     for _ in range(limit):
         changed, cur = _step(br, prev_path, read, cur)
@@ -339,15 +331,15 @@ def rig_status(br):
 
 
 def dialog_buttons(br):
-    """Beschriftung der Fussschalter (ButtonText1..n, MX5 3, Pedalboard 12), wenn am Geraet ein
-    Dialog offen ist, sonst None. Knopf k haengt am Schalter RawFootswitches/FS<k>."""
+    """Dialog footswitch labels (ButtonText1..n; MX5: 3, Pedalboard: 12), or None
+    if no dialog is open. Button k maps to RawFootswitches/FS<k>."""
     v = strings(br, [BOARD] + [BTN % n for n in range(1, DEV.buttons + 1)])
     return v[1:] if v[0] == "FreeText" else None
 
 
 def dialog_key(buttons, *labels):
-    """Nummer (1-basiert) des ersten Knopfs, dessen Beschriftung einer von labels ist (ohne Gross-/
-    Kleinschreibung), sonst None."""
+    """One-based index of the first button matching a label case-insensitively,
+    otherwise None."""
     low = [(b or "").strip().lower() for b in buttons or []]
     for label in labels:
         if label in low:
@@ -356,7 +348,7 @@ def dialog_key(buttons, *labels):
 
 
 def dialog_press(br, buttons, *labels):
-    """Den Dialogknopf mit einer der Beschriftungen druecken; LiveError, wenn es ihn nicht gibt."""
+    """Press a dialog button matching one of labels; raise LiveError if absent."""
     k = dialog_key(buttons, *labels)
     if not k:
         raise LiveError("A dialog is open on the %s (%s). Please answer it on the display."
@@ -366,7 +358,7 @@ def dialog_press(br, buttons, *labels):
 
 
 def _save_key(buttons):
-    """Knopf 'save' des Speichern-Dialogs (cancel | save | save_new_rig) oder None."""
+    """Save button of cancel|save|save_new_rig dialog, or None."""
     for i, b in enumerate(buttons or []):
         t = (b or "").strip().lower()
         if t.startswith("save") and "new" not in t:
@@ -375,8 +367,8 @@ def _save_key(buttons):
 
 
 def discard_dialog(br):
-    """Den Dialog 'Cancel | Save | Discard' (ungespeicherte Aenderungen) mit Discard beantworten.
-    Liefert True, wenn ein solcher Dialog offen war."""
+    """Discard the Cancel|Save|Discard unsaved-changes dialog.
+    Return True if such a dialog was open."""
     b = dialog_buttons(br)
     if not b:
         return False
@@ -385,9 +377,9 @@ def discard_dialog(br):
 
 
 def drop_changes(br, st=None):
-    """Das geladene Rig als unveraendert markieren (Rigs/Dirty = 0), damit der naechste
-    Wechsel ohne 'Cancel | Save | Discard'-Dialog verwirft - statt FS3 zu druecken.
-    Liefert True, wenn das Rig geaendert war (fuer keep_changes)."""
+    """Mark the current rig clean (Rigs/Dirty=0) so the next switch discards without
+    Cancel|Save|Discard, rather than pressing FS3. Return whether it was dirty
+    (used by keep_changes)."""
     if st is None:
         st = rig_status(br)
     if not st["dirty"]:
@@ -397,15 +389,14 @@ def drop_changes(br, st=None):
 
 
 def keep_changes(br):
-    """Gegenstueck zu drop_changes, wenn der Wechsel doch nicht stattfand: das geladene
-    Rig traegt seine Aenderungen noch, also wieder als geaendert markieren."""
+    """Inverse of drop_changes when switching did not occur: edits are still in
+    memory, so mark the rig dirty again."""
     br.set("%s/Dirty" % RIGS, "state", 1)
 
 
 def wait_for(br, cond, timeout=LOAD_WAIT, discard=False):
-    """Rig-Status abfragen, bis cond(status) gilt. Mit discard=True wird ein
-    'Confirm Dirty'-Dialog des MX5 dabei mit Discard beantwortet (Rueckfall; normalerweise
-    verhindert drop_changes den Dialog schon vorher)."""
+    """Poll rig status until cond(status). With discard=True, dismiss Confirm Dirty
+    with Discard as a fallback; normally drop_changes prevents the dialog."""
     end = time.time() + timeout
     while True:
         st = rig_status(br)
@@ -421,9 +412,9 @@ def wait_for(br, cond, timeout=LOAD_WAIT, discard=False):
 
 
 def _seek(br, items, target, read, next_path, prev_path, limit, what):
-    """Anzeige Schritt fuer Schritt auf den Eintrag 'target' blaettern. items gibt nur die
-    vermutete Richtung vor (Datenbank-Reihenfolge); nach jedem Druck wird gelesen, am Ende
-    der Liste wird umgekehrt - so stimmt das Ergebnis auch bei abweichender Reihenfolge."""
+    """Navigate to target one step at a time. items suggests direction (database
+    order); reread after each press and reverse at list ends, allowing device
+    order to differ."""
     cur = read(br)
     if cur == target:
         return
@@ -439,7 +430,7 @@ def _seek(br, items, target, read, next_path, prev_path, limit, what):
 
 
 def seek_setlist(br, setlists, name):
-    """Set-Anzeige (SetName1) auf die Setlist 'name' stellen."""
+    """Navigate SetName1 to setlist name."""
     _seek(br, setlists, name, read_set_cursor, "%s/NextSetBank" % PC, "%s/PrevSetBank" % PC,
           MAX_SETLISTS, "setlist list")
 
@@ -449,26 +440,26 @@ def _bank_names(br):
 
 
 def bank_names(rows, bank):
-    """Namen der Bank 'bank' (0-basiert) der Rig-Liste rows, wie die Bank-Anzeige sie zeigt:
-    ohne Werks-Nummer, freie Plaetze der letzten Bank als '[EMPTY]'."""
+    """Displayed names for zero-based bank in rows: omit factory number prefixes;
+    unused slots in the last bank are '[EMPTY]'."""
     start = bank * DEV.bank_step
     names = [display_name(r["name"]) for r in rows[start:start + DEV.bank_show]]
     return names + [EMPTY_RIG] * (DEV.bank_show - len(names))
 
 
 def bank_count(rows):
-    """Anzahl der Bank-Stellungen (je NextBank DEV.bank_step Plaetze weiter)."""
+    """Number of bank positions (NextBank advances DEV.bank_step slots)."""
     return max(1, (len(rows) + DEV.bank_step - 1) // DEV.bank_step)
 
 
 def goto_bank(br, rows, target):
-    """Bank-Anzeige auf die Bank 'target' der Liste rows stellen und pruefen, dass sie genau deren
-    Namen zeigt. Wo die Anzeige steht, verraet die gezeigte Bank (Datenbank- = Geraete-
-    Reihenfolge); ist das nicht eindeutig, wird erst an den Anfang geblaettert. Zeigt die Anzeige
-    danach etwas anderes, weicht die Liste am Geraet ab (LiveError: neu lesen)."""
+    """Navigate to target bank in rows and verify exact displayed names. The bank
+    identifies device position because database/device orders match. If ambiguous,
+    first navigate to the start. A remaining mismatch means the device list
+    differs; raise LiveError so it can be reread."""
     want = bank_names(rows, target)
     banks = [bank_names(rows, b) for b in range(bank_count(rows))]
-    for _ in range(3):   # kurz nach einem Rig-Wechsel verschluckt das MX5 Tastendruecke
+    for _ in range(3):   # MX5 drops button presses immediately after changing rigs
         cur = _bank_names(br)
         if cur == want:
             return
@@ -490,27 +481,26 @@ def goto_bank(br, rows, target):
 
 
 def _prog(row):
-    """Anzeige-Programmnummer einer Rig-Zeile (Datenbank zaehlt ab 0, -1 = keine) oder None."""
+    """Displayed program number for a rig row (DB is zero-based; -1 means none), or None."""
     p = row.get("prog_num")
     return int(p) + 1 if p is not None and int(p) >= 0 else None
 
 
-JUMP = PC + "/NextPreset"   # Zaehler: Schreiben springt um (neu - alt) Plaetze der aktiven Liste
-JUMP_MAX = 16000000         # Wertebereich bis 16777216; darueber wird rueckwaerts gerechnet
-LAST_LOAD = {}              # letzter load_rig: {"via": "jump"|"prog"|"bank", "secs": Dauer} (Tests, Fehlersuche)
+JUMP = PC + "/NextPreset"   # Counter: writing advances (new - old) positions in the active list
+JUMP_MAX = 16000000         # Range up to 16777216; beyond that, calculate backwards
+LAST_LOAD = {}              # Last load_rig: {'via': 'jump'|'prog'|'bank', 'secs': duration} for tests/diagnostics
 
 
 def jump(br, rows, index, before):
-    """rows[index] per NextPreset laden: das Geraet springt um die Differenz zum vorigen Wert
-    (negativ = rueckwaerts, ringfoermig ueber das Listenende; eine volle Listenlaenge laedt das
-    aktuelle Rig frisch) - ein Schreibzugriff, ~0,06 s, ohne die Bank-Anzeige zu blaettern
-    (am Geraet geprueft 2026-09-30, auch 100 Plaetze in All Rigs). Braucht die eindeutige
-    Position des Geraete-Zeigers: nach eigenem Laden die geladene Position, nach dem Betreten
-    einer Liste Platz 0 - auch wenn das geladene Rig woanders steht (geprueft 2026-09-30); das
-    merkt sich die Verbindung (br.cursor = (LoadedID, Platz); read_rig_list setzt ihn beim
-    Verbinden). Hat das Geraet selbst ein anderes Rig geladen (LoadedID weicht ab), steht der
-    Zeiger auf dessen Position, wenn sie eindeutig ist. Ohne bekannten Zeiger wird nicht geraten
-    (ein falsch geladenes Rig waere hoerbar): False, dann laedt load_rig anders."""
+    """Load rows[index] via NextPreset: jump by the change from its previous value
+    (negative goes backwards, wrapping at list ends; a full list length reloads
+    the current rig). One write, ~0.06 s, no bank navigation (verified 2026-09-30,
+    including 100 slots in All Rigs). Requires an unambiguous device cursor:
+    after loading, the loaded position; after entering a list, position 0 even
+    if the loaded rig is elsewhere (verified 2026-09-30). Store br.cursor as
+    (LoadedID, position); read_rig_list initializes it. A device-side rig change
+    moves it to that rig if unique. Never guess: loading the wrong rig would
+    be audible. Return False so load_rig can use another method."""
     ids = [r["id"] for r in rows]
     n = len(rows)
     cur = getattr(br, "cursor", None)
@@ -521,7 +511,7 @@ def jump(br, rows, index, before):
     elif before["id"] and ids.count(before["id"]) == 1:
         pos = ids.index(before["id"])
     else:
-        return False   # nichts geladen oder das Rig steht mehrfach in der Setlist
+        return False   # Nothing loaded, or this rig appears multiple times in the setlist
     delta = (index - pos) % n or n
     old = int(br.get(JUMP).get("unnormalized") or 0)
     new = old + delta if old + delta <= JUMP_MAX else old - (n - delta if delta < n else n)
@@ -530,32 +520,31 @@ def jump(br, rows, index, before):
 
 
 def load_rig(br, rows, index, discard=False, fast=True):
-    """Rig rows[index] der aktiven Liste laden (rows = Datenbankzeilen in Geraete-Reihenfolge).
-    Per Sprung (jump), sonst ueber die Programmnummer, zuletzt ueber die Bank-Anzeige; ob das
-    richtige Rig geladen ist, entscheidet die LoadedID. discard=True: Aenderungen am geladenen
-    Rig ohne Rueckfrage am Geraet verwerfen (drop_changes). Ist rows[index] das geladene Rig,
-    wird es frisch geladen. fast=False: nur ueber die Bank (Test des Rueckfalls).
-    Liefert den Rig-Status danach."""
+    """Load rows[index] in the active list (database rows in device order).
+    Prefer jump, then program number, finally bank navigation. Verify LoadedID.
+    discard=True discards unsaved edits without a device prompt (drop_changes).
+    Reload if already current. fast=False forces bank navigation to test the
+    fallback. Return the resulting rig status."""
     target = rows[index]
     rid = target["id"]
     before = rig_status(br)
     same = before["id"] == rid
     loaded = lambda s: s["id"] == rid and (not same or not s["dirty"])
-    dropped = discard and drop_changes(br, before)   # kein Discard-Dialog am Geraet
+    dropped = discard and drop_changes(br, before)   # Prevent a device Discard dialog
     prog = _prog(target)
     t0 = time.time()
     via = lambda how: LAST_LOAD.update(via=how, secs=time.time() - t0)
     try:
         if fast and jump(br, rows, index, before):
-            if same:   # Neuladen desselben Rigs: am Status nicht zu erkennen
+            if same:   # Reloading the same rig cannot be detected from status
                 time.sleep(RELOAD_WAIT)
             st = wait_for(br, loaded, timeout=1.0, discard=discard and before["dirty"])
             if loaded(st):
                 via("jump")
                 br.cursor = (rid, index)
                 return st
-            br.cursor = None   # anderes Rig gelandet (Zeiger/Liste am Geraet anders): ueber die Bank weiter
-        if prog and not same and fast:   # ReceivePresetIndex auf das geladene Rig tut nichts
+            br.cursor = None   # Wrong rig loaded (device cursor/list differs): continue via bank navigation
+        if prog and not same and fast:   # ReceivePresetIndex targeting the current rig does nothing
             br.set("%s/ReceivePresetIndex" % RIGS, "unnormalized", prog - 1)
             st = wait_for(br, loaded, timeout=1.0, discard=discard and before["dirty"])
             if loaded(st):
@@ -564,7 +553,7 @@ def load_rig(br, rows, index, discard=False, fast=True):
                 return st
         goto_bank(br, rows, index // DEV.bank_step)
         press(br, "%s/LoadRig%d" % (PC, index % DEV.bank_step + 1))
-        if same:   # Neuladen desselben Rigs: am Status erst spaet zu erkennen
+        if same:   # Reloading the same rig is visible in status only after a delay
             time.sleep(RELOAD_WAIT)
         st = wait_for(br, loaded, discard=discard and before["dirty"])
         via("bank")
@@ -584,9 +573,9 @@ def load_rig(br, rows, index, discard=False, fast=True):
 
 
 def reload_rig(br, rows):
-    """Geladenes Rig frisch laden (Aenderungen verwerfen), ueber seine Position in rows (per ID):
-    Sprung um eine volle Listenlaenge, sonst LoadRig in seiner Bank. Dirty wird vorher geloescht,
-    dann laedt das Geraet ohne Discard-Dialog (geprueft 2026-09-29/30)."""
+    """Reload the current rig, discarding changes, at its position in rows by ID:
+    jump a full list length, otherwise use its bank's LoadRig. Clear Dirty first
+    to avoid the Discard prompt (verified 2026-09-29/30)."""
     ids = [r["id"] for r in rows]
     st = rig_status(br)
     if st["id"] not in ids:
@@ -597,18 +586,17 @@ def reload_rig(br, rows):
 # ---- Setlists ----
 
 def enter_setlist(br, setlists, name, setlist_ids, discard=False, active=False):
-    """Setlist 'name' (oder ALL_RIGS) am Geraet aktivieren; liefert die Liste wie read_rig_list.
-    Beim Wechsel in eine andere Setlist laedt das MX5 deren erstes Rig (discard=True: ohne
-    Rueckfrage verwerfen); 'All Rigs' laedt nichts, ein geaendertes Rig bleibt geaendert. Das
-    Betreten liest die Liste (Namen, Farben, Programmnummern) neu aus der Datenbank - auch die
-    schon aktive Setlist, und dann laedt es nichts, das geladene Rig bleibt samt seinen
-    Aenderungen (am Geraet geprueft 2026-09-17). active=True sagt das vorab, damit nicht auf ein
-    Laden gewartet wird - so dient es nach Datenbankaenderungen als Auffrischen."""
+    """Activate setlist name (or ALL_RIGS); return read_rig_list-style data.
+    Entering a different setlist loads its first rig (discard=True suppresses
+    the prompt). All Rigs loads nothing and preserves edits. Entering rereads
+    names/colors/programs from the DB, including reentering the active list:
+    that loads nothing and preserves rig/edits (verified 2026-09-17).
+    active=True tells us not to wait for a load; used to refresh after DB writes."""
     if name != ALL_RIGS and name not in setlist_ids:
         raise LiveError("Setlist '%s' not found." % name)
-    rows = db_rigs(br, None if name == ALL_RIGS else setlist_ids[name])   # vorab: welches Rig laedt das Betreten
+    rows = db_rigs(br, None if name == ALL_RIGS else setlist_ids[name])   # Determine which rig entering the list will load
     before = rig_status(br)
-    mode = br.get(BOARD)   # Ansicht (AccessSet1/AccessRigView schalten sie um)
+    mode = br.get(BOARD)   # View (AccessSet1/AccessRigView change it)
     if name == ALL_RIGS:
         press(br, "%s/AccessRigView" % RC)
         time.sleep(SETTLE)
@@ -616,8 +604,8 @@ def enter_setlist(br, setlists, name, setlist_ids, discard=False, active=False):
     else:
         seek_setlist(br, setlists, name)
         first = rows[0]["id"] if rows else None
-        # Wird sicher ein anderes Rig geladen, Dirty vorher loeschen: dann fragt das MX5 nicht
-        # (sonst Discard-Dialog -> FS3). Die schon aktive Setlist laedt nichts - dort nicht.
+        # If another rig will load, clear Dirty first to avoid a prompt
+        # (otherwise Discard via FS3). Do not clear it for the already-active list.
         dropped = discard and not active and first and first != before["id"] and drop_changes(br, before)
         press(br, "%s/AccessSet1" % RC)
         time.sleep(SETTLE)
@@ -625,69 +613,69 @@ def enter_setlist(br, setlists, name, setlist_ids, discard=False, active=False):
             st = rig_status(br)
         else:
             if first and first != before["id"]:
-                # das Laden des ersten Rigs abwarten (LoadedID wechselt erst nach einer Weile)
+                # Wait for the first rig to load; LoadedID updates after a delay
                 st = wait_for(br, lambda s: s["id"] == first and not s["dirty"], discard=discard and before["dirty"])
             else:
                 st = wait_for(br, lambda s: not s["dirty"], discard=discard and before["dirty"])
-            if dropped and st["id"] == before["id"]:   # nichts geladen: Aenderungen sind noch da
+            if dropped and st["id"] == before["id"]:   # Nothing loaded: edits remain intact
                 keep_changes(br)
                 st = rig_status(br)
             if st["dirty"]:
                 raise LiveError("The %s did not switch the setlist. Is it asking on the display about "
                                 "unsaved changes? Then confirm there." % DEV.name)
-            for _ in range(10):   # Name und ID werden nacheinander aktualisiert
+            for _ in range(10):   # Name and ID update sequentially
                 st2 = rig_status(br)
                 if st2 == st:
                     break
                 st = st2
                 time.sleep(0.1)
-    _wait_stable(br, read_bank)   # die Bank-Anzeige wird verzoegert umgestellt
+    _wait_stable(br, read_bank)   # Bank display updates after a delay
     if DEV.setlists or (mode or {}).get("string") not in ("Set", "SetRig"):
-        restore_board(br, mode)   # Pedalboard: nicht zurueck in die Song-Ansicht einer Setlist
-    br.cursor = (st["id"], 0)   # Geraete-Zeiger fuer jump: erster Platz, auch wenn das Rig woanders steht
+        restore_board(br, mode)   # Pedalboard: do not return to a setlist's song view
+    br.cursor = (st["id"], 0)   # Jump cursor: first slot, even if the loaded rig is elsewhere
     return {"setlists": setlists, "setlist": name, "sure": True, "status": st, "rows": rows,
             "setlist_ids": setlist_ids}
 
 
-# ---- Rig-Datenbank (Bruecke 0.3: SQL-Befehl, nur lesend) ----
+# ---- Rig database (bridge 0.3: read-only SQL command) ----
 #
-# Tabellen: rigs(id, name, content, show_order, author, is_readonly, color, created_at,
+# Tables: rigs(id, name, content, show_order, author, is_readonly, color, created_at,
 # prog_num), setlists(id, name, ...), setlist_rigs(setlist_id, rig_id, show_order),
-# settings(name, value). 'content' ist der Rig-Inhalt wie in einer .rig-Datei.
+# settings(name, value). content is the inner JSON from a .rig file.
 
 RIG_COLOURS = ["Off", "Green", "Dark Green", "Yellow", "Orange", "Red", "Pink", "Purple", "Blue",
-               "Light Blue", "White", "Grey", "Turquoise", "Black"]   # rigs.color -> Anzeigename
+               "Light Blue", "White", "Grey", "Turquoise", "Black"]   # rigs.color -> display name
 RIG_FIELDS = "id, name, color, prog_num, show_order"
 
 
-# Antwortgrenze: bis Bruecke 0.5 ca. 48 KB (127 Teile), ab 0.6 mit langem Antwortkopf bis ca. 6 MB.
-# Seiten werden ab 0.6 um PAGE_FACTOR groesser (~1 MB je Antwort, ~7 s bei ~140 KB/s).
+# Reply limit: ~48 KB/127 parts through bridge 0.5; ~6 MB with long headers on 0.6+.
+# 0.6+ multiplies pages by PAGE_FACTOR (~1 MB/reply, ~7 s at ~140 KB/s).
 PAGE_FACTOR = 20
 
 
 def _page(br, rows):
-    """Seitengroesse (Zeilen oder Zeichen) fuer eine Bruecke: rows gilt fuer die 48-KB-Grenze."""
+    """Page size (rows or characters); rows assumes the old 48 KB limit."""
     return rows * PAGE_FACTOR if getattr(br, "long", False) else rows
 
 
 def db_setlists(br):
-    """[(id, name)] aller Setlists."""
+    """[(id, name)] for every setlist."""
     return [(r["id"], r["name"]) for r in br.sql("select id, name from setlists order by name collate nocase")]
 
 
 def db_rigs(br, setlist_id=None):
-    """Rigs der Setlist (oder alle) in Geraete-Reihenfolge: [{id, name, color, prog_num, show_order}].
-    Setlists: nach setlist_rigs.show_order. 'All Rigs': nach rowid - die App fragt ohne ORDER BY
-    ab; die ersten Rigs wurden einmal nach Namen sortiert eingefuegt (Werks-DB/USB-Import), neuere
-    haengen hinten an (am Geraet geprueft 2026-09-30, alle 330 Rigs). Die Werks-Rigs heissen
-    '003 MODERN PLEXI' usw., die Anzeige laesst die Nummer weg (display_name). prog_num in der DB =
-    Anzeige-Programmnummer - 1, -1 = keine."""
+    """Setlist/all rigs in device order: [{id, name, color, prog_num, show_order}].
+    Setlists use setlist_rigs.show_order. All Rigs uses rowid: the app queries
+    without ORDER BY. Initial factory/USB-import rigs were inserted by name;
+    newer ones append (verified 2026-09-30, all 330 rigs). Factory names like
+    '003 MODERN PLEXI' lose their numeric prefix in display_name. DB prog_num
+    is displayed number minus one; -1 means none."""
     if setlist_id:
         q = ("select r.id, r.name, r.color, r.prog_num, s.show_order from setlist_rigs s "
              "join rigs r on r.id = s.rig_id where s.setlist_id = %s order by s.show_order" % sql_lit(setlist_id))
     else:
         q = "select %s from rigs order by rowid" % RIG_FIELDS
-    # Antworten sind (bis 0.5) auf ca. 48 KB begrenzt -> seitenweise lesen
+    # Replies are limited to ~48 KB through 0.5; paginate
     rows, page = [], _page(br, 150)
     while True:
         part = br.sql("%s limit %d offset %d" % (q, page, len(rows)))
@@ -697,14 +685,14 @@ def db_rigs(br, setlist_id=None):
 
 
 def display_name(name):
-    """Rig-Name wie in der Bank-Anzeige: Werks-Nummer ('003 ') am Anfang entfaellt."""
+    """Bank display rig name: omit leading factory number ('003 ')."""
     if len(name) > 4 and name[:3].isdigit() and name[3] == " ":
         return name[4:]
     return name
 
 
 def _sql_text(br, column, where, size=15000):
-    """Lange Textspalte einer Zeile stueckweise lesen (eine Antwort fasst ca. 48 KB, ab 0.6 mehr)."""
+    """Read a long text column in chunks (~48 KB per reply, larger on 0.6+)."""
     out, pos, size = [], 1, _page(br, size)
     while True:
         rows = br.sql("select substr(%s, %d, %d) t from %s" % (column, pos, size, where))
@@ -716,17 +704,17 @@ def _sql_text(br, column, where, size=15000):
 
 
 def _exact_row(br, table, cols, key, keyval):
-    """Eine Zeile lesen (Spalten cols) oder None."""
+    """Read one row with columns cols, or None."""
     rows = br.sql("select %s from %s where %s = %s" % (", ".join(cols), table, key, sql_lit(keyval)))
     return rows[0] if rows else None
 
 
-SETTINGS_INLINE = 4000   # laengere Texte (State_Last ~34000 Zeichen) sprengen sonst die Antwortgrenze
+SETTINGS_INLINE = 4000   # Long text (State_Last ~34000 characters) otherwise exceeds the reply limit
 
 
 def db_settings(br):
-    """Tabelle settings als {name: value}. Kurze Werte kommen in der ersten Abfrage mit, lange
-    werden je Zeile stueckweise ueber _sql_text nachgeladen."""
+    """settings table as {name: value}. Fetch short values initially; load long
+    values per row in chunks via _sql_text."""
     big = "typeof(value) = 'text' and length(value) > %d" % _page(br, SETTINGS_INLINE)
     rows = br.sql("select name, %s as big, case when %s then null else value end as value from settings" % (big, big))
     return {r["name"]: _sql_text(br, "value", "settings where name = %s" % sql_lit(r["name"])) if r["big"] else r["value"]
@@ -737,7 +725,7 @@ RIG_ROW = ["id", "name", "content", "show_order", "author", "is_readonly", "colo
 
 
 def db_rig(br, rig_id):
-    """Vollstaendige Zeile eines Rigs (mit content) fuer den Export als .rig-Datei."""
+    """Complete rig row, including content, for .rig export."""
     row = _exact_row(br, "rigs", RIG_ROW, "id", rig_id)
     if row is None:
         raise LiveError("Rig not found in the database.")
@@ -745,26 +733,26 @@ def db_rig(br, rig_id):
 
 
 def rig_file_json(row):
-    """Zeile der rigs-Tabelle als .rig-Datei (gleiche Form wie der USB-Export des Geraets)."""
+    """Convert a rigs-table row to the device USB export's .rig format."""
     d = {"author": row.get("author", ""), "color": row.get("color", 0), "content": row["content"],
          "created_at": row.get("created_at", 0), "id": row["id"], "order": row.get("show_order", 0),
          "prog_num": row.get("prog_num", -1), "readonly": bool(row.get("is_readonly", 0))}
-    return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False)   # am Geraet byte-identisch geprueft
+    return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False)   # Verified byte-identical on hardware
 
 
-# ---- Komplettsicherung (Rigs, Setlists, Block-Presets als Dateien wie im USB-Transfer-Modus) ----
+# ---- Full backup (rigs, setlists, block presets in USB Transfer file formats) ----
 #
-# Der USB-Modus zeigt Rigs\<Name>.rig, Setlists\<Name>.setlist und Blocks\<Typ>\<Name>.block.
-# Alle drei Formen lassen sich aus den Tabellen rigs, setlists(+setlist_rigs) und blocks
-# byte-identisch nachbauen (am Geraet gegen einen USB-Export geprueft). Die Sicherung legt
-# die gleiche Ordnerstruktur an, damit sie im USB-Modus zurueckkopiert werden koennte.
+# USB mode exposes Rigs/<name>.rig, Setlists/<name>.setlist and Blocks/<type>/<name>.block.
+# Reconstruct all three byte-identically from rigs, setlists(+setlist_rigs), and blocks
+# (verified against a device USB export). Backups use the same folder layout
+# so they can also be copied back through USB Transfer mode.
 
 _BAD_CHARS = '<>:"/\\|?*'
 _RESERVED = {"CON", "PRN", "AUX", "NUL"} | {"COM%d" % i for i in range(1, 10)} | {"LPT%d" % i for i in range(1, 10)}
 
 
 def safe_filename(name):
-    """Name als Windows-taugliche Datei: verbotene Zeichen -> '_', kein Punkt/Leerzeichen am Ende."""
+    """Windows-safe filename: forbidden characters -> '_'; no trailing dot/space."""
     s = "".join("_" if c in _BAD_CHARS or ord(c) < 32 else c for c in str(name)).rstrip(" .")
     if not s or s.upper() in _RESERVED:
         s = "_" + s
@@ -772,7 +760,7 @@ def safe_filename(name):
 
 
 def _unique_path(folder, name, ext, used):
-    """Pfad in folder, der noch nicht vergeben ist (Windows unterscheidet keine Gross-/Kleinschreibung)."""
+    """Unused path in folder, accounting for Windows case-insensitivity."""
     base = safe_filename(name)
     cand, n = base, 1
     while (cand + ext).lower() in used:
@@ -788,7 +776,7 @@ def _write(path, text):
 
 
 def db_setlist_rows(br):
-    """Alle Setlists mit ihren Rigs in Reihenfolge: [(setlist_row, [(rig_id, rig_name)])]."""
+    """All setlists with ordered rigs: [(setlist_row, [(rig_id, rig_name)])]."""
     out = []
     for sl in br.sql("select id from setlists order by name collate nocase"):
         sl = _exact_row(br, "setlists", ["id", "name", "author", "is_readonly", "created_at"], "id", sl["id"])
@@ -799,7 +787,7 @@ def db_setlist_rows(br):
 
 
 def setlist_file_json(sl, rigs):
-    """Setlist-Zeile + Rigs als .setlist-Datei (gleiche Form wie der USB-Export)."""
+    """Setlist row and rigs in the device USB export's .setlist format."""
     d = {"author": sl.get("author", ""), "created_at": sl.get("created_at", 0), "id": sl["id"],
          "readonly": bool(sl.get("is_readonly", 0)), "rig_names": [n for _, n in rigs],
          "rigs": [i for i, _ in rigs], "version": "1.0.0"}
@@ -807,8 +795,8 @@ def setlist_file_json(sl, rigs):
 
 
 def db_blocks(br, page=25):
-    """Alle Block-Presets [{id, type, name, content, is_readonly}]; ca. 1 KB pro Zeile,
-    darum in Seiten (Antwortgrenze ca. 48 KB, ab 0.6 mehr)."""
+    """All block presets [{id, type, name, content, is_readonly}]. About 1 KB per row,
+    so paginate (~48 KB reply limit, larger on 0.6+)."""
     rows, page = [], _page(br, page)
     while True:
         part = br.sql("select id, type, name, content, is_readonly from blocks "
@@ -819,32 +807,32 @@ def db_blocks(br, page=25):
 
 
 def block_file_json(row):
-    """Zeile der blocks-Tabelle als .block-Datei (gleiche Form wie der USB-Export)."""
+    """Convert a blocks-table row to the device USB export's .block format."""
     d = {"content": row["content"], "id": row["id"], "readonly": bool(row.get("is_readonly", 0)),
          "type": row["type"]}
     return json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-# ---- Block-Presets ----
+# ---- Block presets ----
 #
-# Die Presets eines Blocktyps (am Geraet: Block-Menue > Preset) liegen in der Tabelle blocks:
-# type = Basisname des Blocks in Grossbuchstaben ('GREEN JRC-OD', 'AMP', 'IR (1024)', 'MIX' fuer
-# die Parallelwege), name = Presetname (Werkspresets beginnen mit '+'), content = JSON
-# {"data": {"<Block>": {"childorder": [...], "children": {Param: Knoten}}}, "info": {...}} mit
-# denselben Knoten wie in .rig-Dateien (type 0 value = unnormalized, 1/3 state, 4/8 string).
-# Ohne On, Colour, Doubling, PresetName. Geladen wird durch Schreiben der Werte; das Geraet setzt
-# dabei Rigs/Dirty nicht (wie bei allen Bridge-Schreibzugriffen), der Editor markiert selbst.
-# PresetCtrl/LoadBlockPreset (mit SelectedBlockIndex/CurrentBlockPresetIndex) NICHT ausloesen:
-# ohne die Preset-Liste am Display stuerzt die Geraete-App ab (Neustart, 'letzten Zustand
-# wiederherstellen?'). Speichern/Umbenennen/Loeschen (SaveBlockPresetConfirmed usw.) ist
-# ungetestet - die Bruecke kann die Datenbank nur lesen.
-PRESET_SKIP = {"DoubleStates"}      # Action: state 1 kopiert A -> B, gehoert nicht zum Klang
-PRESET_MODULE = {"Chain": "Mix"}    # Pseudo-Modul der Parallelwege: /Engine/Patch/Mix spiegelt Chain/Para*
-                                    # und traegt den Presetnamen (Chain/PresetName gibt es nicht)
+# Block presets (device Block menu > Preset) reside in the blocks table:
+# type is uppercase block base name ('GREEN JRC-OD', 'AMP', 'IR (1024)', 'MIX' for
+# parallel paths); name is the preset name (factory presets start '+'); content is JSON
+# {'data': {'<block>': {'childorder': [...], 'children': {parameter: node}}}, 'info': {...}}
+# with the same nodes as .rig files (type 0: unnormalized value; 1/3: state; 4/8: string).
+# Exclude On, Colour, Doubling, PresetName. Load by writing values; as with all bridge
+# writes, this does not set Rigs/Dirty, so the editor marks it explicitly.
+# Do NOT trigger PresetCtrl/LoadBlockPreset with SelectedBlockIndex/CurrentBlockPresetIndex:
+# without the preset list on screen, it crashes the device app (restart and
+# 'restore last state?' prompt). Save/rename/delete (SaveBlockPresetConfirmed, etc.)
+# were untested here; this original code path only reads the database.
+PRESET_SKIP = {"DoubleStates"}      # Action: state 1 copies A -> B; not a sound parameter
+PRESET_MODULE = {"Chain": "Mix"}    # Parallel-path pseudo-module: /Engine/Patch/Mix mirrors Chain/Para*
+                                    # and stores the preset name (Chain/PresetName does not exist)
 
 
 def preset_type(module):
-    """blocks.type zu einem Modulnamen ('Green JRC-OD 2' -> 'GREEN JRC-OD')."""
+    """blocks.type for a module ('Green JRC-OD 2' -> 'GREEN JRC-OD')."""
     return _base_module(module).upper()
 
 
@@ -854,8 +842,8 @@ def _preset_rows(rows):
 
 
 def db_preset_names(br, page=150):
-    """Namen aller Block-Presets: {TYP: [{id, type, name, readonly}]} in Geraete-Reihenfolge
-    (nach Name; Werkspresets '+...' zuerst). ~720 Zeilen, seitenweise (Antwortgrenze ca. 48 KB)."""
+    """All block preset names: {TYPE: [{id, type, name, readonly}]} in device order
+    (by name, factory '+...' first). ~720 rows, paginated for the ~48 KB limit."""
     rows, page = [], _page(br, page)
     while True:
         part = br.sql("select id, type, name, is_readonly from blocks "
@@ -870,7 +858,7 @@ def db_preset_names(br, page=150):
 
 
 def db_presets_of(br, module):
-    """Presets eines Blocktyps [{id, type, name, readonly}]."""
+    """Presets for a block type: [{id, type, name, readonly}]."""
     rows = br.sql("select id, type, name, is_readonly from blocks where type = %s "
                   "order by name" % sql_lit(preset_type(module)))
     return _preset_rows(rows)
@@ -884,13 +872,13 @@ def db_preset_content(br, preset_id):
 
 
 def preset_name_path(module, half="A"):
-    """Pfad des Presetnamens eines Blocks (Haelfte B eines doppelten Blocks: PresetName2)."""
+    """Block preset name path (half B of a doubled block uses PresetName2)."""
     return LiveRig.path(PRESET_MODULE.get(module, module), "PresetName" + ("2" if half == "B" else ""))
 
 
 def preset_writes(module, content, half="A"):
-    """Schreibvorgaenge [(pfad, feld, wert)] zum Laden eines Presets in den Block 'module'
-    (Haelfte B eines doppelten Blocks: Parameter mit Endung 2)."""
+    """Writes [(path, field, value)] to load a preset into module;
+    half B of a doubled block uses parameters suffixed 2."""
     data = json.loads(content)["data"] if isinstance(content, str) else content["data"]
     node = next(iter(data.values()), {})
     children = node.get("children", {})
@@ -916,8 +904,8 @@ def preset_writes(module, content, half="A"):
 
 
 def load_block_preset(br, module, preset, half="A"):
-    """Preset {id, name} in den Block laden: Werte schreiben und den Presetnamen setzen.
-    Liefert die Zahl der geschriebenen Parameter."""
+    """Load preset {id, name} into a block: write values and preset name.
+    Return the number of parameters written."""
     row = db_preset_content(br, preset["id"])
     writes = preset_writes(module, row["content"], half)
     if not writes:
@@ -927,7 +915,7 @@ def load_block_preset(br, module, preset, half="A"):
         try:
             r = br.set(path, field, value)
         except BridgeError as e:
-            if "no property" in str(e):   # z.B. TremSync hat keinen Zwilling TremSync2 in Haelfte B
+            if "no property" in str(e):   # E.g. TremSync has no TremSync2 counterpart in half B
                 continue
             raise
         if not r.get("ok"):
@@ -939,14 +927,14 @@ def load_block_preset(br, module, preset, half="A"):
     return done
 
 
-RIG_BATCH = 20   # Rigs je Anfrage in backup_all ab Bruecke 0.6 (Rig-Inhalt ~25 KB)
+RIG_BATCH = 20   # Rigs per backup_all request on bridge 0.6+ (rig content ~25 KB)
 
 
 def backup_all(br, folder, progress=None):
-    """Alle Rigs, Setlists und Block-Presets aus der Datenbank des Geraets nach folder
-    schreiben (Rigs\\, Setlists\\, Blocks\\<Typ>\\ + Sicherung.txt). progress(text) meldet
-    den Fortschritt. Liefert {"rigs", "setlists", "blocks", "folder", "seconds"}.
-    Dauer: ca. 8 MB Rig-Inhalt bei ~100 KB/s -> gut eine Minute."""
+    """Back up all device rigs, setlists and block presets to folder
+    (Rigs/, Setlists/, Blocks/<type>/ and backup report). progress(text)
+    reports progress. Return {rigs, setlists, blocks, folder, seconds}.
+    About 8 MB rig content at ~100 KB/s takes a little over a minute."""
     t0 = time.time()
 
     def say(txt):
@@ -959,7 +947,7 @@ def backup_all(br, folder, progress=None):
         os.makedirs(d, exist_ok=True)
     used = set()
     if getattr(br, "long", False):
-        # ab 0.6: RIG_BATCH Rigs je Anfrage (~0,5 MB), Namen kommen exakt (Zeichen-Escapes)
+        # 0.6+: RIG_BATCH rigs per request (~0.5 MB); names are exact via character escapes
         done = 0
         while True:
             part = br.sql("select %s from rigs order by rowid limit %d offset %d"
@@ -975,7 +963,7 @@ def backup_all(br, folder, progress=None):
     else:
         for n, r in enumerate(rigs, 1):
             say("Backing up rig %d of %d: %s" % (n, len(rigs), display_name(r["name"])))
-            row = db_rig(br, r["id"])   # liefert auch den exakten Namen (Umlaute)
+            row = db_rig(br, r["id"])   # Also returns the exact Unicode name
             _write(_unique_path(rig_dir, row["name"], ".rig", used), rig_file_json(row))
     say("Backing up setlists …")
     setlists = db_setlist_rows(br)
@@ -995,7 +983,7 @@ def backup_all(br, folder, progress=None):
         _write(os.path.join(folder, "Einstellungen.json"),
                json.dumps(settings, sort_keys=True, indent=1, ensure_ascii=False))
     except Exception:
-        pass   # nur Beiwerk, die Rigs sind das Wichtige
+        pass   # Ancillary metadata; the rigs themselves matter most
     secs = time.time() - t0
     info = ["MX-Edit - backup of %s" % time.strftime("%d.%m.%Y %H:%M"),
             "Bridge: %s" % getattr(br, "version", "?"),
@@ -1011,20 +999,19 @@ def backup_all(br, folder, progress=None):
             "Whether the MX5 takes over copied-back files on sync (especially overwritten,",
             "already existing ones) is untested - try it with a single rig first.",
             "Backup duration: %.0f s" % secs]
-    _write(os.path.join(folder, "Sicherung.txt"), "\r\n".join(info) + "\r\n")
+    _write(os.path.join(folder, "Backup.txt"), "\r\n".join(info) + "\r\n")
     return {"rigs": len(rigs), "setlists": len(setlists), "blocks": len(blocks), "folder": folder, "seconds": secs}
 
 
 def read_rig_list(br):
-    """Setlists und die Rig-Liste der aktiven Liste aus der Datenbank: {setlists, setlist, sure,
-    rows, setlist_ids, status}. Welche Liste aktiv ist, meldet das Geraet nicht (settings.State_Last
-    traegt sie, wird aber nur beim Beenden der App geschrieben - geprueft 2026-09-30); sie wird
-    erkannt, indem die gerade gezeigte Bank in allen Listen gesucht wird (sure=False: nicht
-    eindeutig, geraten). Die Set-Anzeige wird nicht durchgeblaettert: ihre Reihenfolge ist die
-    Namensreihenfolge der Datenbank, und seek_setlist findet eine Setlist auch sonst. Ist die
-    aktive Liste erkannt, wird sie neu betreten (enter_setlist active=True), damit der Zeiger fuer
-    jump bekannt ist."""
-    if not DEV.setlists:   # Pedalboard: Setlists bestehen aus Songs - nur All Rigs (laedt nichts)
+    """Read setlists and the active rig list from the DB: {setlists, setlist, sure,
+    rows, setlist_ids, status}. The device does not report its active list:
+    settings.State_Last contains it but updates only on app exit (2026-09-30).
+    Infer it by matching the displayed bank against all lists (sure=False means
+    ambiguous/guessed). Do not navigate the set display: its order matches DB
+    name order and seek_setlist can find it regardless. Reenter the detected
+    active list (enter_setlist active=True) to establish the jump cursor."""
+    if not DEV.setlists:   # Pedalboard setlists contain songs; All Rigs only, without loading
         return enter_setlist(br, [], ALL_RIGS, {}, active=True)
     cursor = read_set_cursor(br)
     sets = db_setlists(br)
@@ -1047,8 +1034,8 @@ def read_rig_list(br):
         active = cursor if cursor in names else ALL_RIGS
         sure = not names
     if sure:
-        # die aktive Liste einmal neu betreten (~1 s, laedt nichts, das Rig behaelt seine Aenderungen):
-        # danach steht der Geraete-Zeiger fuer jump bekannt auf Platz 0
+        # Reenter the active list once (~1 s, no load, edits preserved):
+        # the jump cursor is then known to be at slot 0
         return enter_setlist(br, names, active, ids, active=True)
     br.cursor = None
     return {"setlists": names, "setlist": active, "sure": sure, "rows": dict(lists)[active],
@@ -1056,7 +1043,7 @@ def read_rig_list(br):
 
 
 def _wait_stable(br, read, gap=0.2, tries=15):
-    """Warten, bis zwei Lesungen im Abstand 'gap' gleich sind."""
+    """Wait for two equal readings separated by gap."""
     prev = read(br)
     for _ in range(tries):
         time.sleep(gap)
@@ -1068,12 +1055,11 @@ def _wait_stable(br, read, gap=0.2, tries=15):
 
 
 def open_save_dialog(br, timeout=2.0):
-    """Speichern-Dialog (cancel | save | save_new_rig) am Geraet oeffnen und warten, bis er steht.
-    Erscheint er nach der halben Zeit nicht (zweimal beobachtet 2026-09-30, jeweils im Lauf direkt
-    nach einem App-Neustart, gezielt nicht nachstellbar), wird er einmal erneut angefordert - nur
-    ohne offenen Dialog. Kommt er gar nicht, wird noch kurz nachgesehen: ein verspaetet
-    aufgegangener Speichern-Dialog wird mit Cancel geschlossen, damit das Geraet nicht mit offenem
-    Dialog stehen bleibt (sonst scheitern alle folgenden Aktionen)."""
+    """Open cancel|save|save_new_rig and wait for it. If absent halfway through,
+    request once more only if no dialog is open (observed twice on 2026-09-30
+    immediately after an app restart, not reliably reproducible). If still
+    absent, briefly check for a late dialog and Cancel it so future actions
+    are not blocked by a lingering prompt."""
     br.set(SAVE, "state", 1)
     end = time.time() + timeout
     retry = time.time() + timeout / 2
@@ -1087,7 +1073,7 @@ def open_save_dialog(br, timeout=2.0):
         if time.time() >= end:
             break
         time.sleep(0.05)
-    for _ in range(20):   # 2 s nachsehen
+    for _ in range(20):   # Check for another 2 seconds
         time.sleep(0.1)
         late = dialog_buttons(br)
         if _save_key(late):
@@ -1098,34 +1084,34 @@ def open_save_dialog(br, timeout=2.0):
 
 
 def save_rig(br):
-    """Speichern-Dialog oeffnen und 'save' druecken (MX5: FS2). Liefert den Rig-Status."""
+    """Open the Save dialog and press save (MX5: FS2); return rig status."""
     press(br, FS % _save_key(open_save_dialog(br)))
     return wait_for(br, lambda s: not s["dirty"])
 
 
 def cancel_dialog(br, buttons=None):
-    """Offenen Dialog mit Cancel schliessen (MX5: FS1); ohne Cancel-Knopf passiert nichts."""
+    """Cancel an open dialog (MX5: FS1); do nothing if no Cancel button exists."""
     k = dialog_key(buttons if buttons is not None else dialog_buttons(br), "cancel")
     if k:
         press(br, FS % k)
 
 
-# ---- Rig-Datenbank schreiben (Bruecke 0.4) ----
+# ---- Rig database writes (bridge 0.4) ----
 #
-# Rigs, Setlists und Programmnummern werden direkt in evil.db geschrieben (eine
-# Transaktion je Aufruf, Rollback beim ersten Fehler; der Datenbankdienst sichert
-# die Datenbank vor dem ersten Schreiben nach dem Einschalten). Die Geraete-App
-# liest Listen, Farben, Namen und Programmnummern aber nur beim Betreten einer
-# Liste neu (AccessRigView / AccessSet1) - darum nach jedem Schreiben refresh_lists
-# (betritt die aktive Liste erneut, laedt dabei nichts, ca. 1 s). Das geladene Rig
-# behaelt seinen Zustand im Speicher; wird seine Zeile geaendert, muss es neu geladen
-# werden (refresh_lists reload_row=True). Eine andere als die aktive Liste braucht
-# kein Auffrischen - das Geraet liest sie beim naechsten Betreten ohnehin frisch.
-# Am Geraet verifiziert 2026-09-17: anlegen (Kopie), umbenennen, Farbe, Programm-
-# nummer, Setlist-Eintrag, loeschen (Cascade auf setlist_rigs), Als neues Rig
-# (save_rig_as).
+# Write rigs, setlists and program numbers directly to evil.db: one transaction
+# per call, rollback on first error; the service backs up before the first
+# write after boot. The device app rereads lists, colors, names and programs
+# only on entering a list (AccessRigView / AccessSet1).
+# Call refresh_lists after every write to reenter the active list
+# (no rig load, ~1 s). The current rig retains its in-memory state;
+# if its row changes, reload it using
+# refresh_lists reload_row=True. Inactive lists need no refresh:
+# the device rereads them the next time they are entered.
+# Verified on hardware 2026-09-17: create/copy, rename, color,
+# program number, setlist entry, delete (cascades to setlist_rigs),
+# and Save as new rig (save_rig_as).
 
-RIG_AUTHOR = "UserName"     # so tragen vom Geraet gespeicherte Rigs ihren Autor ein
+RIG_AUTHOR = "UserName"     # Author value used by rigs saved on the device
 MAX_PROG = 128
 
 
@@ -1135,7 +1121,7 @@ def new_id():
 
 
 def check_rig_name(name):
-    """Rig-Namen wie das Geraet begrenzen (Grossbuchstaben, ASCII, max. 32 Zeichen)."""
+    """Apply device rig-name limits: uppercase ASCII, at most 32 characters."""
     name = " ".join(name.split())
     if not name:
         raise LiveError("The name must not be empty.")
@@ -1147,7 +1133,7 @@ def check_rig_name(name):
 
 
 def db_name_taken(br, table, name, except_id=None):
-    """True, wenn es in table schon eine Zeile mit diesem Namen gibt (ohne Gross/Klein)."""
+    """True if table already has a row with this name, case-insensitively."""
     where = "name = %s collate nocase" % sql_lit(name)
     if except_id:
         where += " and id <> %s" % sql_lit(except_id)
@@ -1155,7 +1141,7 @@ def db_name_taken(br, table, name, except_id=None):
 
 
 def db_prognum_owner(br, prog, except_id=None):
-    """Name des Rigs, das die Programmnummer (Anzeige 1..128) schon hat, sonst None."""
+    """Name of the rig owning displayed program number 1..128, otherwise None."""
     where = "prog_num = %d" % (prog - 1)
     if except_id:
         where += " and id <> %s" % sql_lit(except_id)
@@ -1164,9 +1150,9 @@ def db_prognum_owner(br, prog, except_id=None):
 
 
 def content_with_name(content, name):
-    """Rig-Inhalt (JSON-Text wie in der Datenbank / .rig-Datei) mit neuem Rig/PresetName.
-    Der Inhalt ist kompaktes JSON mit sortierten Schluesseln (am Geraet verifiziert), darum
-    bleibt alles andere byte-identisch."""
+    """Rig content JSON (DB/.rig format) with a new Rig/PresetName.
+    Compact JSON with sorted keys, verified on hardware, leaves everything
+    else byte-identical."""
     try:
         c = json.loads(content)
         c["data"]["Patch"]["children"]["Rig"]["children"]["PresetName"]["string"] = name
@@ -1176,10 +1162,10 @@ def content_with_name(content, name):
 
 
 def blank_rig_content(name):
-    """Inhalt eines leeren Rigs (alle Plaetze 'Empty Slot', seriell, kein Gate, Fussschalter
-    Toggle/unbelegt, Pedale Classic) - nachgebaut nach einem am Geraet leer angelegten Rig
-    ('PASS THROUGH'). Das 'Neues Rig' des Geraets (apiRigs.makeNewRig) ist ueber die Bruecke
-    nicht erreichbar. Liefert den JSON-Text wie in der Datenbank."""
+    """Empty rig content: all slots Empty Slot, serial, no gate, unassigned Toggle
+    footswitches, Classic pedals. Reconstructed from device-created PASS THROUGH.
+    The device's apiRigs.makeNewRig is inaccessible through the bridge.
+    Return database-format JSON text."""
     def num(v, t=0):
         return {"type": t, "value": v}
 
@@ -1244,10 +1230,10 @@ def blank_rig_content(name):
 
 
 def create_rig(br, name, src_id=None, content=None, color=0, prog=None, setlist_id=None):
-    """Neues Rig anlegen: Kopie von src_id (Inhalt aus der Datenbank) oder mit content
-    (Inhaltstext einer .rig-Datei); der innere Rig/PresetName wird auf name gesetzt.
-    prog = Anzeige-Programmnummer oder None. setlist_id: ausserdem ans Ende dieser Setlist
-    haengen. Liefert die neue ID. (Anfragen bis 100 KB kommen durch, Rigs sind < 30 KB.)"""
+    """Create a rig from src_id's DB content or supplied .rig content; set inner
+    Rig/PresetName to name. prog is the displayed program number or None.
+    setlist_id also appends it to that setlist. Return the new ID.
+    Requests up to 100 KB are supported; rigs are under 30 KB."""
     name = check_rig_name(name)
     if db_name_taken(br, "rigs", name):
         raise LiveError("There is already a rig called '%s'." % name)
@@ -1276,7 +1262,7 @@ def rename_rig(br, rig_id, name):
     name = check_rig_name(name)
     if db_name_taken(br, "rigs", name, rig_id):
         raise LiveError("There is already a rig called '%s'." % name)
-    content = content_with_name(db_rig(br, rig_id)["content"], name)   # auch der innere PresetName
+    content = content_with_name(db_rig(br, rig_id)["content"], name)   # Also update the inner PresetName
     br.sql_write("update rigs set name = %s, content = %s where id = %s"
                  % (sql_lit(name), sql_lit(content), sql_lit(rig_id)))
     return name
@@ -1287,8 +1273,8 @@ def set_rig_color(br, rig_id, color):
 
 
 def set_rig_prognum(br, rig_id, prog):
-    """Programmnummer (Anzeige 1..128) setzen, None = keine. Eine belegte Nummer wird
-    dem anderen Rig weggenommen (wie am Geraet)."""
+    """Set displayed program number 1..128, or None. Remove it from any current
+    owner, matching device behavior."""
     if prog is None:
         pn = -1
     else:
@@ -1302,21 +1288,20 @@ def set_rig_prognum(br, rig_id, prog):
 
 
 def delete_rig(br, rig_id):
-    """Rig loeschen (Setlist-Eintraege verschwinden mit). Nicht fuer das geladene Rig."""
+    """Delete a rig and its setlist entries. Cannot delete the loaded rig."""
     if rig_status(br)["id"] == rig_id:
         raise LiveError("The loaded rig cannot be deleted - load another one first.")
     return br.sql_write("delete from rigs where id = %s" % sql_lit(rig_id))
 
 
 def save_rig_as(br, name, setlist_id=None, prog=None):
-    """Das geladene Rig mit seinem aktuellen Stand (auch ungespeicherte Aenderungen) als
-    neues Rig anlegen (Bruecke 0.4) - Ersatz fuer 'save_new_rig', dessen Namenseingabe nur
-    am Touchscreen geht. Weg: gespeicherten Inhalt der Zeile merken, am Geraet speichern
-    (die Zeile traegt dann den Live-Stand), diesen als neue Zeile mit neuem Namen kopieren
-    und die alte Zeile zuruecksetzen - beides in einer Transaktion. Danach ist das alte Rig
-    geladen und sauber (im Speicher mit dem Live-Stand, in der Datenbank wie zuvor); der
-    Aufrufer laedt das neue Rig (refresh_lists). setlist_id: ausserdem ans Ende dieser
-    Setlist haengen. Liefert die neue ID."""
+    """Create a new rig from the loaded live state, including unsaved edits
+    (bridge 0.4), replacing save_new_rig's touchscreen-only name entry.
+    Preserve the old row, save on device to capture live state, copy that row
+    under a new name and restore the old row in one transaction. The old rig
+    remains loaded and clean, with live state in memory and original state
+    in the DB; caller loads the new rig via refresh_lists. setlist_id also
+    appends to that setlist. Return the new ID."""
     name = check_rig_name(name)
     if db_name_taken(br, "rigs", name):
         raise LiveError("There is already a rig called '%s'." % name)
@@ -1377,20 +1362,19 @@ def rename_setlist(br, setlist_id, name):
 
 
 def delete_setlist(br, setlist_id):
-    """Setlist loeschen; die Rigs bleiben erhalten."""
+    """Delete a setlist without deleting its rigs."""
     return br.sql_write("delete from setlists where id = %s" % sql_lit(setlist_id))
 
 
 def setlist_add(br, setlist_id, rig_id):
-    """Rig ans Ende der Setlist haengen (ein Rig darf mehrfach vorkommen, wie am Geraet)."""
+    """Append a rig to a setlist; duplicates are allowed, as on the device."""
     br.sql_write(_setlist_append_sql(setlist_id, rig_id))
 
 
 def setlist_set_order(br, setlist_id, rig_ids):
-    """Setlist komplett neu befuellen: rig_ids in dieser Reihenfolge (entfernen, sortieren,
-    einfuegen in einem Schritt)."""
+    """Replace a setlist's contents with rig_ids in order: remove/reorder/insert in one operation."""
     sql = "delete from setlist_rigs where setlist_id = %s" % sql_lit(setlist_id)
-    for n, rid in enumerate(rig_ids):   # None = Platz eines fehlenden Rigs (rig_id NULL, wie am Geraet)
+    for n, rid in enumerate(rig_ids):   # None represents a missing rig slot (NULL rig_id), as on the device
         sql += "; insert into setlist_rigs (id, setlist_id, rig_id, show_order) values (%s, %s, %s, %d)" % (
             sql_lit(new_id()), sql_lit(setlist_id), "null" if rid is None else sql_lit(rid), n)
     br.sql_write(sql)
@@ -1402,8 +1386,8 @@ def db_setlist_rig_ids(br, setlist_id):
 
 
 def db_setlist_members(br):
-    """Alle Setlists mit ihren Rig-IDs in Reihenfolge: {setlist_id: [rig_id oder None]}
-    (seitenweise, die Antwort waere bei vielen Eintraegen sonst zu gross)."""
+    """All ordered setlist rig IDs: {setlist_id: [rig_id or None]}.
+    Paginate to avoid oversized replies for large lists."""
     q = "select setlist_id, rig_id from setlist_rigs order by setlist_id, show_order"
     out, rows, page = {}, [], _page(br, 400)
     while True:
@@ -1417,8 +1401,8 @@ def db_setlist_members(br):
 
 
 def set_rig_prognums(br, pairs):
-    """Mehrere Programmnummern in einer Transaktion setzen: pairs = [(rig_id, Anzeige-Nummer)].
-    Wer eine der Nummern schon hat, verliert sie (wie set_rig_prognum)."""
+    """Set program numbers in one transaction: pairs=[(rig_id, displayed_number)].
+    Remove any existing ownership, as in set_rig_prognum."""
     sql = []
     for rid, prog in pairs:
         if not 1 <= int(prog) <= MAX_PROG:
@@ -1430,13 +1414,13 @@ def set_rig_prognums(br, pairs):
         br.sql_write("; ".join(sql))
 
 
-# ---- Block-Preset speichern (Bruecke 0.4) ----
+# ---- Save block preset (bridge 0.4) ----
 #
-# Ein Nutzerpreset ist der Block-Teilbaum des Rigs (data.Patch.children.<Block>) ohne
-# PresetName/PresetName2/Doubling/On/Colour und ohne die Parameter der Haelfte B (Endung 2),
-# in der Reihenfolge des Rigs, unter dem Basisnamen des Blocks, mit info.version 1.0.9
-# (aus 10 Nutzerpresets des Geraets abgeleitet). Die Werte kommen live vom Geraet, damit
-# auch ungespeicherte Aenderungen im Preset landen.
+# A user preset is a rig's block subtree (data.Patch.children.<block>) excluding
+# PresetName/PresetName2/Doubling/On/Colour and half-B parameters (suffix 2),
+# in rig parameter order, under the block base name, with info.version 1.0.9
+# (derived from 10 device user presets). Read live values so
+# unsaved edits are included.
 
 PRESET_OMIT = {"PresetName", "PresetName2", "Doubling", "On", "Colour"}
 PRESET_VERSION = "1.0.9"
@@ -1447,8 +1431,8 @@ def _base_module(module):
 
 
 def preset_content_from_rig(content, module, half="A"):
-    """Preset-Inhalt (JSON-Text) fuer den Block 'module' aus einem Rig-Inhalt; half='B' nimmt
-    die Parameter mit Endung 2 (ohne Endung gespeichert)."""
+    """Block preset content JSON from rig content; half='B' uses parameters
+    suffixed 2, stored without the suffix."""
     try:
         patch = json.loads(content)["data"]["Patch"]["children"]
     except (ValueError, KeyError, TypeError) as e:
@@ -1482,7 +1466,7 @@ def preset_content_from_rig(content, module, half="A"):
 
 
 def preset_content_live(br, content, module, half="A"):
-    """Wie preset_content_from_rig, aber mit den aktuellen Werten vom Geraet."""
+    """Like preset_content_from_rig, but with current device values."""
     text = preset_content_from_rig(content, module, half)
     d = json.loads(text)
     blk = next(iter(d["data"].values()))
@@ -1507,11 +1491,11 @@ def preset_content_live(br, content, module, half="A"):
 
 
 def save_block_preset(br, rig_id, module, name, half="A", live=True, replace=False):
-    """Preset des Blocks 'module' des Rigs rig_id unter 'name' in der Datenbank anlegen
-    (Bruecke 0.4). live=True: aktuelle Werte vom Geraet, sonst die des gespeicherten Rigs.
-    replace=True: ein eigenes Preset gleichen Namens ueberschreiben. Setzt danach den
-    Presetnamen des Blocks am Geraet. Liefert (preset_id, 'neu'|'ersetzt')."""
-    name = " ".join(name.split())   # Presetnamen duerfen Kleinbuchstaben haben (wie am Geraet)
+    """Create a named module preset for rig_id in the DB (bridge 0.4).
+    live=True reads device values, otherwise saved rig values. replace=True
+    overwrites a user preset with the same name. Set the device block's preset
+    name afterwards. Return (preset_id, 'new'|'replaced'), legacy internal status keys."""
+    name = " ".join(name.split())   # Preset names may contain lowercase letters, matching the device
     if not name:
         raise LiveError("The preset name must not be empty.")
     if name.startswith("+"):
@@ -1526,12 +1510,12 @@ def save_block_preset(br, rig_id, module, name, half="A", live=True, replace=Fal
             raise LiveError("There is already a preset '%s' for %s." % (name, typ))
         pid = rows[0]["id"]
         br.sql_write("update blocks set content = %s where id = %s" % (sql_lit(text), sql_lit(pid)))
-        what = "ersetzt"
+        what = "replaced"
     else:
         pid = new_id()
         br.sql_write("insert into blocks (id, type, name, content, is_readonly) values (%s, %s, %s, %s, 0)"
                      % (sql_lit(pid), sql_lit(typ), sql_lit(name), sql_lit(text)))
-        what = "neu"
+        what = "new"
     br.set(preset_name_path(module, half), "string", name)
     return pid, what
 
@@ -1543,7 +1527,7 @@ def delete_block_preset(br, preset_id):
     return br.sql_write("delete from blocks where id = %s" % sql_lit(preset_id))
 
 
-# ---- Dateien auf das Geraet (Umkehrung von backup_all) ----
+# ---- Upload files (inverse of backup_all) ----
 
 def _read_json_file(path):
     try:
@@ -1554,7 +1538,7 @@ def _read_json_file(path):
 
 
 def rig_name_of_file(d, path):
-    """Name eines Rigs aus einer .rig-Datei: innerer PresetName, sonst Dateiname."""
+    """Rig name from .rig: inner PresetName, otherwise filename."""
     try:
         return json.loads(d["content"])["data"]["Patch"]["children"]["Rig"]["children"]["PresetName"]["string"]
     except (KeyError, ValueError, TypeError):
@@ -1571,17 +1555,16 @@ def db_ids(br, table, page=500):
 
 
 def import_rig_file(br, path, name=None, mode="new", setlist_id=None, keep_prog=False):
-    """Eine .rig-Datei auf das Geraet bringen. mode: 'new' = neues Rig mit neuer ID (Name aus
-    der Datei oder name), 'replace' = Rig mit der ID aus der Datei ueberschreiben (Inhalt,
-    Farbe), 'restore' = mit der ID aus der Datei anlegen, falls es sie noch nicht gibt (sonst
-    nichts tun). keep_prog: Programmnummer der Datei uebernehmen, wenn sie frei ist.
-    Liefert (rig_id, 'neu'|'ersetzt'|'vorhanden')."""
+    """Import a .rig file. mode='new': new rig/new ID, named from file or name;
+    'replace': overwrite existing file ID's content/color; 'restore': create
+    with file ID only if absent. keep_prog preserves the file's program number
+    if free. Return (rig_id, 'new'|'replaced'|'existing'), legacy internal status keys."""
     d = _read_json_file(path)
     if "content" not in d:
         raise LiveError("%s is not a .rig file." % os.path.basename(path))
     name = name or rig_name_of_file(d, path)
-    # Namen aus Dateien so lassen, wie das Geraet sie geschrieben hat (auch Umlaute: sql_lit
-    # kodiert sie hex); nur ein frei gewaehlter Name wird wie am Geraet geprueft
+    # Preserve device-written file names, including Unicode (sql_lit uses hex);
+    # only user-supplied names undergo device-style validation
     name = check_rig_name(name) if mode == "new" else (" ".join(name.split()) or os.path.basename(path))
     color = int(d.get("color") or 0)
     prog = int(d.get("prog_num", -1)) + 1 if keep_prog and int(d.get("prog_num", -1)) >= 0 else None
@@ -1595,10 +1578,10 @@ def import_rig_file(br, path, name=None, mode="new", setlist_id=None, keep_prog=
         if prog is not None:
             sql += ", prog_num = %d" % (prog - 1)
         br.sql_write(sql + " where id = %s" % sql_lit(fid))
-        return fid, "ersetzt"
+        return fid, "replaced"
     if mode == "restore":
         if exists:
-            return fid, "vorhanden"
+            return fid, "existing"
         if db_name_taken(br, "rigs", name):
             name = _free_name(br, "rigs", name)
         content = content_with_name(d["content"], name)
@@ -1610,15 +1593,15 @@ def import_rig_file(br, path, name=None, mode="new", setlist_id=None, keep_prog=
         if setlist_id:
             sql += "; " + _setlist_append_sql(setlist_id, fid)
         br.sql_write(sql)
-        return fid, "neu"
+        return fid, "new"
     if db_name_taken(br, "rigs", name):
         name = _free_name(br, "rigs", name)
     rid = create_rig(br, name, content=d["content"], color=color, prog=prog, setlist_id=setlist_id)
-    return rid, "neu"
+    return rid, "new"
 
 
 def _free_name(br, table, name):
-    """'NAME' -> 'NAME 2', 'NAME 3', ... bis der Name frei ist."""
+    """'NAME' -> 'NAME 2', 'NAME 3', ... until unused."""
     base = name[:29]
     for n in range(2, 100):
         cand = "%s %d" % (base, n)
@@ -1628,14 +1611,14 @@ def _free_name(br, table, name):
 
 
 def import_setlist_file(br, path, rig_ids_present):
-    """Eine .setlist-Datei anlegen, falls die ID fehlt. Rigs, die es nicht gibt, werden
-    wie am Geraet leere Plaetze (rig_id NULL). Liefert 'neu'|'vorhanden'."""
+    """Import a .setlist if its ID is absent. Missing rigs become empty slots
+    (NULL rig_id), as on device. Return legacy internal status 'new'|'existing'."""
     d = _read_json_file(path)
     if "rigs" not in d:
         raise LiveError("%s is not a .setlist file." % os.path.basename(path))
     sid = d.get("id") or new_id()
     if br.sql("select 1 from setlists where id = %s" % sql_lit(sid)):
-        return "vorhanden"
+        return "existing"
     name = os.path.splitext(os.path.basename(path))[0]
     if db_name_taken(br, "setlists", name):
         name = _free_name(br, "setlists", name)
@@ -1645,12 +1628,12 @@ def import_setlist_file(br, path, rig_ids_present):
         sql += "; insert into setlist_rigs (id, setlist_id, rig_id, show_order) values (%s, %s, %s, %d)" % (
             sql_lit(new_id()), sql_lit(sid), sql_lit(rid) if rid in rig_ids_present else "NULL", n)
     br.sql_write(sql)
-    return "neu"
+    return "new"
 
 
 def import_block_file(br, path):
-    """Eine .block-Datei (Block-Preset) anlegen, falls ID und (Typ, Name) frei sind.
-    Der Presetname ist der Dateiname. Liefert 'neu'|'vorhanden'."""
+    """Import a .block preset if its ID and (type, name) are unused.
+    Use filename as preset name. Return legacy internal status 'new'|'existing'."""
     d = _read_json_file(path)
     if "content" not in d or "type" not in d:
         raise LiveError("%s is not a .block file." % os.path.basename(path))
@@ -1658,20 +1641,19 @@ def import_block_file(br, path):
     name = os.path.splitext(os.path.basename(path))[0]
     if br.sql("select 1 from blocks where id = %s or (type = %s and name = %s)"
               % (sql_lit(bid), sql_lit(d["type"]), sql_lit(name))):
-        return "vorhanden"
+        return "existing"
     br.sql_write("insert into blocks (id, type, name, content, is_readonly) values (%s, %s, %s, %s, 0)"
                  % (sql_lit(bid), sql_lit(d["type"]), sql_lit(name), sql_lit(d["content"])))
-    return "neu"
+    return "new"
 
 
 def restore_all(br, folder, progress=None, replace=False):
-    """Umkehrung von backup_all: Rigs\\, Setlists\\, Blocks\\ aus folder auf das Geraet.
-    Rigs und Presets, die es (nach ID) schon gibt, bleiben unangetastet - mit replace=True
-    werden vorhandene Rigs ueberschrieben. Setlists werden nur angelegt, wenn ihre ID fehlt.
-    Danach ist ein App-Neustart noetig (restart_app), damit das Geraet neue Setlists sieht.
-    Liefert Zaehler und Fehlerliste."""
+    """Inverse of backup_all: restore Rigs/, Setlists/, Blocks/ from folder.
+    Preserve existing rig/preset IDs unless replace=True overwrites rigs.
+    Create setlists only for absent IDs. Call restart_app afterwards so the
+    device sees new setlists. Return counters and an error list."""
     say = progress or (lambda t: None)
-    counts = {"rigs": 0, "rigs_ersetzt": 0, "rigs_vorhanden": 0, "setlists": 0, "blocks": 0, "fehler": []}
+    counts = {"rigs": 0, "rigs_replaced": 0, "rigs_existing": 0, "setlists": 0, "blocks": 0, "errors": []}
     rig_dir, set_dir, blk_dir = (os.path.join(folder, d) for d in ("Rigs", "Setlists", "Blocks"))
     rig_files = sorted(f for f in os.listdir(rig_dir) if f.lower().endswith(".rig")) if os.path.isdir(rig_dir) else []
     present = db_ids(br, "rigs")
@@ -1681,30 +1663,30 @@ def restore_all(br, folder, progress=None, replace=False):
             d = _read_json_file(os.path.join(rig_dir, f))
             mode = "replace" if replace and d.get("id") in present else "restore"
             rid, what = import_rig_file(br, os.path.join(rig_dir, f), mode=mode, keep_prog=True)
-            counts["rigs" if what == "neu" else "rigs_" + what] += 1
+            counts["rigs" if what == "new" else "rigs_" + what] += 1
             present.add(rid)
         except LiveError as e:
-            counts["fehler"].append(str(e))
+            counts["errors"].append(str(e))
     if os.path.isdir(set_dir):
         for f in sorted(os.listdir(set_dir)):
             if not f.lower().endswith(".setlist"):
                 continue
             say("Setlist %s" % f[:-8])
             try:
-                if import_setlist_file(br, os.path.join(set_dir, f), present) == "neu":
+                if import_setlist_file(br, os.path.join(set_dir, f), present) == "new":
                     counts["setlists"] += 1
             except LiveError as e:
-                counts["fehler"].append(str(e))
+                counts["errors"].append(str(e))
     if os.path.isdir(blk_dir):
         files = [os.path.join(r, f) for r, _, fs in os.walk(blk_dir) for f in fs if f.lower().endswith(".block")]
         for n, p in enumerate(sorted(files), 1):
             if n % 10 == 1:
                 say("Block preset %d of %d" % (n, len(files)))
             try:
-                if import_block_file(br, p) == "neu":
+                if import_block_file(br, p) == "new":
                     counts["blocks"] += 1
             except LiveError as e:
-                counts["fehler"].append(str(e))
+                counts["errors"].append(str(e))
     return counts
 
 
@@ -1713,11 +1695,11 @@ def _set_rig_content(br, rig_id, content):
 
 
 def stash_edits(br, rig_id):
-    """Vor einem App-Neustart: ungespeicherte Aenderungen des geladenen Rigs rig_id sichern, ohne das
-    Rig zu speichern - wie save_rig_as: gespeicherten Inhalt merken, am Geraet speichern (die Zeile
-    traegt dann den Live-Stand), den Live-Stand merken und die Zeile sofort zuruecksetzen. Liefert
-    {'id', 'saved', 'live'} oder None (nicht geaendert / anderes Rig geladen). Schreibgeschuetzte
-    Rigs lassen sich am Geraet nicht speichern -> LiveError."""
+    """Before restart, preserve loaded rig_id's unsaved edits without permanently
+    saving it: remember its row, save on device to capture live state, retain
+    that state and immediately restore the old row. Return {id, saved, live}
+    or None (clean/different loaded rig). Read-only rigs cannot be saved and
+    raise LiveError."""
     st = rig_status(br)
     if not rig_id or st["id"] != rig_id or not st["dirty"]:
         return None
@@ -1733,18 +1715,16 @@ def stash_edits(br, rig_id):
 
 
 def restart_app(br, rig_id=None, setlist=None, progress=None, timeout=90, action="restart", keep_edits=False):
-    """Geraete-App neu starten (Bruecke 0.4). Noetig nach Setlist-Aenderungen: die Set-
-    Anzeige (SetName1) liest die Setlists nur beim App-Start. Dauert ca. 10 s; ungesicherte
-    Aenderungen am geladenen Rig gehen verloren. Den 'letzten Zustand wiederherstellen?'-
-    Dialog beantwortet die Funktion mit No (FS2): danach ist nichts geladen und All Rigs
-    aktiv - ein definierter Zustand. (Yes stellte einen aelteren Stand wieder her: ein
-    anderes, als geaendert markiertes Rig, das beim naechsten Wechsel nachfragt.) Dann wird
-    setlist betreten und rig_id geladen. Liefert das Ergebnis wie read_rig_list. action: die
-    Aktion, die neu startet (restart; nam-on/nam-off schalten vorher NAM um, Bruecke 0.7).
-    keep_edits: ungespeicherte Aenderungen von rig_id ueberstehen den Neustart (stash_edits): das
-    Rig wird mit dem Live-Stand geladen, die Zeile danach wieder auf den gespeicherten Stand gesetzt
-    und das Rig als geaendert markiert (res['edits_kept']); geht das nicht, steht der Grund in
-    res['edits_lost']. progress(Text, Anteil 0..1 oder None)."""
+    """Restart the device app (bridge 0.4), needed after setlist changes because
+    SetName1 reads lists only at startup. Takes ~10 s; unsaved edits are lost
+    unless preserved. Answer 'restore last state?' with No (FS2), giving a
+    defined state: nothing loaded, All Rigs active. Yes restores an older,
+    possibly different dirty rig that prompts on the next switch. Then enter
+    setlist and load rig_id. Return read_rig_list-style data. action defaults
+    to restart; nam-on/nam-off toggle NAM first (bridge 0.7). keep_edits uses
+    stash_edits: load live state, restore the saved DB row, mark the rig dirty.
+    res['edits_kept'] reports success; res['edits_lost'] explains failure.
+    progress(text, fraction 0..1 or None)."""
     say = progress or (lambda t, f=None: None)
     stash, lost = None, None
     if keep_edits and rig_id:
@@ -1754,7 +1734,7 @@ def restart_app(br, rig_id=None, setlist=None, progress=None, timeout=90, action
         except LiveError as e:
             lost = str(e)
     say("Stopping the device app ...", 0.04)
-    board = br.get(BOARD)   # Ansicht am Geraet; nach dem Neustart landet es sonst in SetRig (2026-09-30)
+    board = br.get(BOARD)   # Device view; otherwise restart leaves it in SetRig (2026-09-30)
     start = time.time()
     br.action(action)
     end = start + timeout
@@ -1763,7 +1743,7 @@ def restart_app(br, rig_id=None, setlist=None, progress=None, timeout=90, action
     while time.time() < start + 3:
         waiting()
         time.sleep(0.5)
-    while True:   # die Bruecke ist erst mit der neuen App wieder da (meist nach ~9 s)
+    while True:   # The bridge returns with the new app, usually after ~9 s
         try:
             br.ping()
             break
@@ -1776,7 +1756,7 @@ def restart_app(br, rig_id=None, setlist=None, progress=None, timeout=90, action
     while time.time() < end:
         b = br.get(BOARD).get("string") == "FreeText" and dialog_buttons(br)
         if b and dialog_key(b, "yes") and dialog_key(b, "no"):
-            press(br, FS % dialog_key(b, "no"))   # No = nichts wiederherstellen (MX5: FS2)
+            press(br, FS % dialog_key(b, "no"))   # No means restore nothing (MX5: FS2)
             for _ in range(20):
                 if br.get(BOARD).get("string") != "FreeText":
                     break
@@ -1784,7 +1764,7 @@ def restart_app(br, rig_id=None, setlist=None, progress=None, timeout=90, action
             break
         time.sleep(0.5)
     time.sleep(SETTLE)
-    if stash:   # der Live-Stand steht in der Zeile, bevor die Listen gelesen werden und das Rig laedt
+    if stash:   # Put live state in the row before reading lists/loading the rig
         _set_rig_content(br, rig_id, stash["live"])
     try:
         say("Reading the rig list ...", 0.72)
@@ -1797,12 +1777,12 @@ def restart_app(br, rig_id=None, setlist=None, progress=None, timeout=90, action
             say("Loading the rig again ...", 0.88)
             res["status"] = load_rig(br, res["rows"], ids.index(rig_id), discard=True)
     finally:
-        if stash:   # gespeicherter Stand zurueck in die Datenbank
+        if stash:   # Restore saved state in the DB
             _set_rig_content(br, rig_id, stash["saved"])
     if stash:
         if rig_status(br)["id"] == rig_id:
             say("Restoring your unsaved edits ...", 0.95)
-            keep_changes(br)   # im Speicher steht der Live-Stand, gespeichert der alte -> geaendert
+            keep_changes(br)   # Live state in memory differs from saved DB state: mark dirty
             res["status"] = rig_status(br)
             res["edits_kept"] = True
         else:
@@ -1813,15 +1793,15 @@ def restart_app(br, rig_id=None, setlist=None, progress=None, timeout=90, action
     return res
 
 
-VIEW_MODES = ("Stomp", "Rig", "Hybrid", "Set", "SetRig", "Looper")   # BoardMode-Ansichten ohne Dialog/Tuner
+VIEW_MODES = ("Stomp", "Rig", "Hybrid", "Set", "SetRig", "Looper")   # BoardMode views excluding dialogs/tuner
 
 
 def restore_board(br, before):
-    """Ansicht am Geraet (BoardMode, Antwort von get) wiederherstellen, wenn eine Aktion sie
-    umgestellt hat - nur zwischen normalen Ansichten, nie in einen Dialog oder den Tuner."""
+    """Restore device BoardMode from a get reply after an action changes it;
+    only ordinary views, never dialogs or tuner."""
     if not before or before.get("string") not in VIEW_MODES or "index" not in before:
         return
-    for _ in range(20):   # ein Dialog oder der Tuner schliesst gerade noch
+    for _ in range(20):   # A dialog or tuner is still closing
         now = br.get(BOARD).get("string")
         if now in VIEW_MODES:
             break
@@ -1833,13 +1813,12 @@ def restore_board(br, before):
 
 
 def refresh_lists(br, setlists, setlist, setlist_ids, reload_id=None, reload_row=False):
-    """Nach Datenbankaenderungen die aktive Liste am Geraet neu lesen lassen (Setlist bzw.
-    All Rigs wieder betreten - laedt nichts, ca. 1 s). Andere Listen liest das Geraet ohnehin
-    frisch, sobald sie betreten werden. reload_id: dieses Rig danach laden - ein anderes als
-    das geladene (save_rig_as) oder mit reload_row=True das geladene selbst, weil seine Zeile
-    geaendert wurde (Name, Farbe, Programmnummer stehen im Speicher des Geraets; ueber die
-    Bank, denn ReceivePresetIndex auf das geladene Rig tut nichts). Liefert das Ergebnis
-    wie enter_setlist."""
+    """After DB changes, reenter the active setlist/All Rigs to reread it (~1 s,
+    no rig load). Other lists reread on their next entry. reload_id loads a
+    different rig (save_rig_as), or with reload_row=True reloads the current
+    rig whose row changed. Names/colors/programs live in device memory; use
+    bank navigation because ReceivePresetIndex does nothing for the current rig.
+    Return enter_setlist-style data."""
     if setlist == ALL_RIGS or setlist not in (setlist_ids or {}):
         setlist = ALL_RIGS
     res = enter_setlist(br, setlists, setlist, setlist_ids, active=True)
@@ -1850,26 +1829,26 @@ def refresh_lists(br, setlists, setlist, setlist_ids, reload_id=None, reload_row
     return res
 
 
-# ---- Impulse Responses (IR-Dateien) ----
+# ---- Impulse responses (IR files) ----
 #
-# Die IR-Dateien liegen dauerhaft im USB-Abbild des Geraets (usb.img, im Betrieb
-# unter IR_DIR eingehaengt, vfat, utf8): <Ordner>/<Name>.wav, eine Ordnerebene; die
-# Werks-IRs aus /usr/Evil/Content werden dorthin kopiert. Der IR-Block traegt die
-# Datei als Text '[directory](<Ordner>)[name](<Name ohne Endung>)' in IR/IR (Haelfte
-# B: IR2, Blocktypen IR und IR (1024)); Schreiben ueber Feld string laedt die IR
-# sofort (PresetCtrl/Resources/IRNotFound[Lite][2][_B] state 1 = Datei fehlt), setzt
-# aber Dirty nicht. Ordner '[IR ROOT]' = Suche ueber alle Ordner (erste Datei mit dem
-# Namen), '[USER]' = Ordner USER. Das Geraet liest den Dateibaum nur beim App-Start
-# (und nach dem USB-Abgleich): nach jeder Aenderung an Dateien ist restart_app
-# noetig, bevor neue Dateien ladbar sind - auch in bestehenden Ordnern (verifiziert
-# 2026-09-17). Dateizugriffe laufen ueber Bridge.read_file/write_file/list_dir/shell
-# (Bruecke 0.3).
+# IR files persist in the device's USB image (usb.img, mounted at IR_DIR,
+# vfat/UTF-8): <folder>/<name>.wav, one folder level.
+# Factory IRs from /usr/Evil/Content are copied there. The block stores
+# '[directory](<folder>)[name](<name without extension>)' in IR/IR (half B:
+# IR2; block types IR and IR (1024)). Writing string loads immediately
+# (PresetCtrl/Resources/IRNotFound[Lite][2][_B] state 1 means missing file)
+# without setting Dirty. '[IR ROOT]' searches all folders, taking the first
+# matching name; '[USER]' means USER folder. The device scans only at app startup
+# and after USB synchronization: restart_app is required after any file change
+# before new files can load, including in existing folders
+# (verified 2026-09-17). File access uses Bridge.read_file/write_file/list_dir/shell
+# (bridge 0.3).
 
 IR_DIR = "/media/az01-internal/Evil/usb_mnt/Impulse Responses"
 IR_ROOT, IR_USER = "[IR ROOT]", "[USER]"
-IR_EXT = (".wav", ".mp3")         # so filtert die Geraete-App (\.(wav|mp3)$)
+IR_EXT = (".wav", ".mp3")         # Matches the device app's filter: .(wav|mp3)$
 IR_MODULES = ("IR", "IR (1024)")
-IR_MAX_KB = 2048                  # groessere Dateien lehnt der Editor ab (das Geraet nutzt ohnehin nur den Anfang)
+IR_MAX_KB = 2048                  # Reject larger files; the device only uses the beginning anyway
 
 
 def ir_string(folder, name):
@@ -1877,7 +1856,7 @@ def ir_string(folder, name):
 
 
 def parse_ir(s):
-    """'[directory](Ordner)[name](Name)' -> (Ordner, Name); anderer Text -> (None, Text)."""
+    """'[directory](folder)[name](name)' -> (folder, name); other text -> (None, text)."""
     s = s or ""
     if s.startswith("[directory](") and "[name](" in s and s.endswith(")"):
         d, _, n = s[len("[directory]("):-1].partition(")[name](")
@@ -1886,7 +1865,7 @@ def parse_ir(s):
 
 
 def ir_label(s, folder=True):
-    """Anzeige wie IRInfoString: 'Ordner / Name' (folder=False: nur der Name)."""
+    """Display like IRInfoString: 'folder / name' (folder=False: name only)."""
     d, n = parse_ir(s)
     if d is None:
         return n
@@ -1908,7 +1887,7 @@ def _ir_folder_name(dirname):
 
 
 def check_ir_name(name, what="Name"):
-    """Fehlertext, wenn name als Datei-/Ordnername auf dem Geraet nicht taugt, sonst None."""
+    """Error text if name is invalid as a device file/folder name, otherwise None."""
     if not name or name != name.strip() or name.endswith("."):
         return "%s must not be empty and must not start/end with a space or dot." % what
     bad = [c for c in name if c in _BAD_CHARS or ord(c) < 32]
@@ -1922,15 +1901,15 @@ def check_ir_name(name, what="Name"):
 
 
 def db_irs(br):
-    """Alle IR-Dateien des Geraets: {'folders': [Ordner], 'files': {Ordner: [(Name, Dateiname)]}}.
-    Ordner in der Reihenfolge des Geraets ([IR ROOT] nur, wenn Dateien direkt im Wurzelordner
-    liegen), Dateien alphabetisch ohne Gross-/Kleinschreibung. Eine Abfrage, ca. 0,3 s."""
+    """All device IRs: {'folders': [folder], 'files': {folder: [(name, filename)]}}.
+    Folders follow device order; include [IR ROOT] only if root files exist.
+    Files sort case-insensitively. One query, ~0.3 s."""
     return _ir_index((rel, is_dir) for rel, is_dir, _ in br.list_dir(IR_DIR, recursive=True))
 
 
 def _ir_index(entries):
-    """IR-Verzeichnis aus [(relativer Pfad mit '/', ist Ordner)] -> Form von db_irs
-    (eine Ordnerebene, nur .wav)."""
+    """Convert [(relative/path, is_directory)] to db_irs layout:
+    one folder level, .wav files only."""
     files, folders = {}, set()
     for rel, is_dir in entries:
         parts = rel.split("/")
@@ -1950,7 +1929,7 @@ def _ir_index(entries):
 
 
 def ir_filename(irs, folder, name):
-    """Dateiname (mit Endung) zu Ordner/Name aus db_irs, sonst None."""
+    """Filename with extension for db_irs folder/name, or None."""
     for n, fn in irs["files"].get(folder, []):
         if n == name:
             return fn
@@ -1958,7 +1937,7 @@ def ir_filename(irs, folder, name):
 
 
 def wav_info(data):
-    """(Kanaele, Abtastrate, Bits, Laenge in Frames) einer WAV-Datei oder None."""
+    """WAV (channels, sample rate, bits, length in frames), or None."""
     if len(data) < 36 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
         return None
     pos, fmt, size = 12, None, None
@@ -1990,9 +1969,9 @@ def ir_create_folder(br, folder):
 
 
 def ir_upload(br, folder, path, name=None, replace=False, progress=None):
-    """Lokale IR-Datei (.wav/.mp3) nach <folder>/<name>.<endung> auf das Geraet schreiben.
-    Liefert (Name, Dateiname). Ohne replace ist eine vorhandene Datei ein Fehler.
-    progress(geschrieben, gesamt) wie Bridge.write_file."""
+    """Upload local .wav/.mp3 IR to device <folder>/<name>.<extension>.
+    Return (name, filename). Existing files fail unless replace=True.
+    progress(written, total), as in Bridge.write_file."""
     base, ext = os.path.splitext(os.path.basename(path))
     ext = ext.lower()
     if ext not in IR_EXT:
@@ -2033,7 +2012,7 @@ def ir_delete(br, folder, filename):
 
 
 def ir_rename(br, folder, filename, new_name):
-    """Datei umbenennen (Endung bleibt); liefert den neuen Dateinamen."""
+    """Rename a file preserving its extension; return the new filename."""
     err = check_ir_name(new_name)
     if err:
         raise LiveError(err)
@@ -2058,14 +2037,14 @@ def ir_rename_folder(br, folder, new_name):
 
 
 def db_rigs_using_ir(br, folder, name):
-    """Namen der Rigs, deren Inhalt diese IR nennt (auch als Haelfte B)."""
+    """Names of rigs referencing this IR, including half B."""
     needle = ir_string(folder, name)
     rows = br.sql("select name from rigs where instr(content, %s) > 0 order by name" % sql_lit(needle))
     return [r["name"] for r in rows]
 
 
 def read_ir_folder(folder):
-    """Offline: 'Impulse Responses' eines USB-Exports -> wie db_irs (leer, wenn es den Ordner nicht gibt)."""
+    """Offline USB export Impulse Responses -> db_irs format, empty if absent."""
     entries = []
     if os.path.isdir(folder):
         for entry in os.listdir(folder):
@@ -2076,17 +2055,17 @@ def read_ir_folder(folder):
     return _ir_index(entries)
 
 
-# ---- Geraetemodell ----
+# ---- Device model ----
 #
-# Die Bruecke laesst sich auch auf Pedalboard und Gigboard bauen (gleiche Firmware-Linie 2.7,
-# Andere_Geraete/BEFUND.txt), aber dieser Code kennt nur die Hardware des MX5: drei Fussschalter
-# FootSwitch5-7, Baenke mit drei Rigs, Dialoge auf FS1-3. Das Modell steht im Device-Tree.
+# Bridge also builds for Pedalboard/Gigboard (same firmware 2.7 family,
+# Andere_Geraete/BEFUND.txt). Original MX5 hardware assumptions: three switches
+# FootSwitch5-7, banks of three rigs, dialogs on FS1-3. Model comes from the device tree.
 DEVICE_MODELS = {"inmusic,hg04": "MX5", "inmusic,mg01": "Pedalboard", "inmusic,hg02": "Gigboard"}
 
 
 def device_model(br):
-    """'MX5', 'Pedalboard', 'Gigboard', sonst der compatible-Eintrag; None, wenn es sich nicht
-    lesen laesst (dann verhaelt sich der Editor wie bisher). Merkt sich das Ergebnis in br.model."""
+    """Return 'MX5', 'Pedalboard', 'Gigboard', or another compatible value;
+    None if unreadable (retain original behavior). Cache in br.model."""
     if not hasattr(br, "model"):
         try:
             rc, out = br.shell("tr '\\0' ' ' < /proc/device-tree/compatible")
@@ -2097,37 +2076,37 @@ def device_model(br):
     return br.model
 
 
-# ---- NAM-Mod (Bruecke 0.7, mit NAM gebaut) ----
+# ---- NAM mod (bridge 0.7, built with NAM) ----
 #
-# Die NAM-Mod von lolgab (github.com/lolgab/headrush-nam-mod) ersetzt die Klangverarbeitung
-# des Anxiety OD (beide Instanzen 'Anxiety OD', 'Anxiety OD 2'; mit 4 Instanzen auch
-# 'Anxiety OD V2' [2]) durch Neural Amp Modeler. Regler (verifiziert am Quelltext v0.1.6,
-# patch/nam_hook.cpp): Drive waehlt das Modell - unnormalized 0..100 = Platz in der nach
-# Dateiname (Bytes) sortierten Liste der .nam-Dateien in NAM_DIR; Plaetze ohne Datei sind
-# stumm. Tone = Eingangs-, Level = Ausgangspegel: unter 50 % linear leiser bis stumm, ab 50 %
-# 0 bis +12 dB. Hi-Lo tut nichts. Das Geraet liest den Ordner nur einmal je App-Start (und
-# ueberspringt Dateien, die es nicht laden kann - dann verschieben sich alle folgenden
-# Plaetze); nach jeder Aenderung an den Dateien ist restart_app noetig. Die Konvention der
-# Mod: Dateinamen 'NNN - Name.nam' mit lueckenloser Nummer = Platz. Rigs speichern den Platz
-# als Drive-Wert - wer Modelle verschiebt oder loescht, muss die Rigs nachziehen (nam_remap).
-# Die Bruecke startet die App nur mit NAM, wenn es eingeschaltet ist (Aktionen nam-on/-off).
+# lolgab's NAM mod (github.com/lolgab/headrush-nam-mod) replaces Anxiety OD's
+# audio processing (Anxiety OD and Anxiety OD 2; with four instances also
+# Anxiety OD V2 [2]) with Neural Amp Modeler. Controls (verified against v0.1.6
+# patch/nam_hook.cpp): Drive selects a model; unnormalized 0..100 is the slot
+# in NAM_DIR's .nam list sorted by filename bytes; absent slots
+# are silent. Tone/Level control input/output: below 50% they attenuate linearly
+# to silence; above 50% they add 0..+12 dB. Hi-Lo does nothing. Scan once at app startup,
+# skipping unloadable files, which shifts all subsequent slots.
+# Restart after every file change. NAM convention:
+# 'NNN - Name.nam', contiguous number = slot. Rigs store Drive as a slot;
+# moving/deleting models requires updating rigs with nam_remap.
+# Bridge launches with NAM only when enabled (nam-on/nam-off actions).
 
 NAM_DIR = "/media/az01-internal/Evil/usb_mnt/NAM"
 NAM_INFO = "/usr/Evil/Scripts/mx5bridge-nam.txt"
 NAM_EXT = ".nam"
-NAM_STEPS = 101                  # Drive 0..100 %, je Prozent ein Modell
-NAM_SILENT = NAM_STEPS - 1       # Platz fuer 'kein Modell' (belegt erst beim 101. Modell)
+NAM_STEPS = 101                  # Drive 0..100%; one model per percent
+NAM_SILENT = NAM_STEPS - 1       # No-model slot, used only when a 101st model exists
 NAM_V1 = ("Anxiety OD", "Anxiety OD 2")
 NAM_V2 = ("Anxiety OD V2", "Anxiety OD V2 2")
 NAM_PRESET_TYPES = {"Anxiety OD": "ANXIETY OD", "Anxiety OD V2": "ANXIETY OD V2"}
-NAM_MAX_MB = 30                  # groessere Dateien lehnt der Editor ab (A1/A2-Modelle sind 0,1..5 MB)
-NAM_TRIM_DB = 12.0               # Tone/Level ueber 50 %: bis zu +12 dB (NAM_TRIM_MAX_DB der Mod)
+NAM_MAX_MB = 30                  # Reject larger files (A1/A2 models are 0.1..5 MB)
+NAM_TRIM_DB = 12.0               # Tone/Level above 50%: up to +12 dB (NAM_TRIM_MAX_DB)
 
 
 def nam_status(br):
-    """NAM-Zustand des Geraets: {installed, on, active, auto_off, ref, instances}. installed=False
-    fuer Firmware ohne NAM oder Bruecke vor 0.7. on = beim naechsten App-Start, active = die
-    laufende App wurde mit NAM gestartet."""
+    """Device NAM state: {installed, on, active, auto_off, ref, instances}.
+    installed=False without NAM or before bridge 0.7. on applies to next launch;
+    active means the running app launched with NAM."""
     off = {"installed": False, "on": False, "active": False, "auto_off": False, "ref": "", "instances": 0}
     if br.vnum < (0, 7):
         return off
@@ -2146,23 +2125,23 @@ def nam_status(br):
 
 
 def nam_modules(nam):
-    """Blocknamen, die NAM spielen (leer, wenn NAM in der laufenden App nicht aktiv ist)."""
+    """Block names playing NAM, empty if inactive in the running app."""
     if not nam or not nam.get("active"):
         return ()
     return NAM_V1 + (NAM_V2 if nam.get("instances", 2) >= 4 else ())
 
 
-NAM_NAMES = {"Anxiety OD": "NAM", "Anxiety OD V2": "NAM V2"}   # Anzeige im Editor (Basisname -> Name)
+NAM_NAMES = {"Anxiety OD": "NAM", "Anxiety OD V2": "NAM V2"}   # Editor display names: base name -> name
 
 
 def nam_display(m):
-    """Anzeigename eines NAM-Blocks: 'Anxiety OD 2' -> 'NAM 2', 'Anxiety OD V2' -> 'NAM V2'."""
+    """NAM block display name: 'Anxiety OD 2' -> 'NAM 2', 'Anxiety OD V2' -> 'NAM V2'."""
     base = base_name(m)
     return NAM_NAMES.get(base, base) + m[len(base):]
 
 
 def nam_base(fn):
-    """Anzeigename einer Modelldatei: ohne 'NNN - ' und ohne .nam."""
+    """Model display filename without 'NNN - ' prefix or .nam extension."""
     n = fn[:-len(NAM_EXT)] if fn.lower().endswith(NAM_EXT) else fn
     if len(n) > 6 and n[:3].isdigit() and n[3:6] == " - ":
         n = n[6:]
@@ -2174,9 +2153,9 @@ def nam_filename(index, name):
 
 
 def _nam_index(files):
-    """[(Dateiname, Bytes)] -> Modelle in der Reihenfolge des Geraets: nur *.nam (ohne '._'-
-    Begleitdateien von macOS), sortiert nach den Bytes des Namens wie std::sort der Mod.
-    Jedes Modell: {file, name, size, index}; index = Drive-Wert, der es waehlt."""
+    """[(filename, bytes)] -> device-ordered models: *.nam only, excluding macOS
+    '._' companions; sort filename bytes like NAM's std::sort.
+    Each model: {file, name, size, index}; index is its selecting Drive value."""
     ok = [(fn, size) for fn, size in files
           if fn.lower().endswith(NAM_EXT) and not fn.startswith("._")]
     ok.sort(key=lambda t: t[0].encode("utf-8"))
@@ -2184,7 +2163,7 @@ def _nam_index(files):
 
 
 def db_nam_models(br):
-    """NAM-Modelle auf dem Geraet: {'exists': Ordner vorhanden, 'models': [...] wie _nam_index}."""
+    """Device NAM models: {'exists': folder_exists, 'models': [...] like _nam_index}."""
     q = sh_quote(NAM_DIR)
     rc, out = br.shell("[ -d %s ] || { echo NODIR; exit 0; }\ncd %s || exit 1\n"
                        "for f in * .[!.]*; do [ -f \"$f\" ] && printf '%%s\\t%%s\\n' \"$(wc -c < \"$f\")\" \"$f\"; done; true"
@@ -2202,7 +2181,7 @@ def db_nam_models(br):
 
 
 def check_nam_name(name):
-    """Fehlertext fuer einen Modellnamen (ohne Nummer/Endung), sonst None."""
+    """Error text for a model name without number/extension, otherwise None."""
     err = check_ir_name(name)
     if err:
         return err
@@ -2212,9 +2191,9 @@ def check_nam_name(name):
 
 
 def check_nam_data(data, what="The file"):
-    """Prueft eine .nam-Datei wie die Mod beim Laden (JSON mit architecture/config/weights).
-    Liefert eine kurze Beschreibung ('WaveNet, 13 KB weights') oder wirft LiveError - eine
-    Datei, die das Geraet nicht laden kann, wuerde alle folgenden Plaetze verschieben."""
+    """Validate .nam like NAM's loader (JSON architecture/config/weights).
+    Return a short description ('WaveNet, 13 KB weights') or raise LiveError:
+    unloadable files would shift all following model slots."""
     try:
         j = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as e:
@@ -2235,9 +2214,9 @@ def nam_download(br, fn, local_path):
 
 
 def nam_rename_files(br, renames, delete=()):
-    """Dateien loeschen und umbenennen, in einem Shell-Skript und ueber Zwischennamen (ein
-    neuer Name kann der alte Name einer anderen Datei sein). Prueft vorher, dass kein Ziel
-    einer Datei gehoert, die bleibt."""
+    """Delete/rename files in one shell script using temporary names, since a new
+    name may be another file's old name. First verify targets are not owned
+    by files that remain."""
     if not renames and not delete:
         return
     d = sh_quote(NAM_DIR)
@@ -2258,10 +2237,9 @@ def _nam_value_sql(json_path):
 
 
 def _nam_paths(nam):
-    """(Tabelle, JSON-Pfad des Drive-Werts, Anzeige, Zusatzbedingung) fuer Rigs und Block-Presets
-    der NAM-Bloecke. Presets nur mit Namen 'NNN - ...' (Konvention der Mod, so legt sie auch
-    der Editor an): die Werks-Presets des Anxiety OD (BRIGHT, SMOOTH ...) sind Overdrive-
-    Einstellungen und in der Datenbank nicht als schreibgeschuetzt markiert."""
+    """(table, Drive JSON path, display label, extra condition) for NAM rigs/presets.
+    Only presets named 'NNN - ...' (NAM/editor convention); Anxiety OD factory
+    presets such as BRIGHT/SMOOTH are overdrive settings, not DB read-only entries."""
     out = []
     for m in nam_modules(nam):
         out.append(("rigs", '$.data.Patch.children."%s".children.Drive.value' % m, m, ""))
@@ -2273,8 +2251,8 @@ def _nam_paths(nam):
 
 
 def nam_usage(br, nam):
-    """Wer welchen Platz benutzt: {Platz: ['Rig NAME (Block)', 'Preset NAME'...]} ueber alle Rigs
-    und Block-Presets der NAM-Bloecke (ein Blick in den Inhalt, ca. 0,5 s)."""
+    """Model usage across rigs/NAM presets: {slot: ['Rig NAME (block)', 'Preset NAME', ...]}.
+    Inspect content, ~0.5 s."""
     usage = {}
     for table, path, what, cond in _nam_paths(nam):
         rows = br.sql("select name, %s as v from %s where json_extract(content, %s) is not null%s"
@@ -2286,9 +2264,9 @@ def nam_usage(br, nam):
 
 
 def nam_remap(br, nam, mapping):
-    """Drive-Werte in Rigs und Block-Presets der NAM-Bloecke nach mapping {alt: neu} umschreiben
-    (eine Transaktion, json_set laesst den restlichen Inhalt unveraendert). Liefert die Zahl
-    der geaenderten Zeilen. Das geladene Rig liest das Geraet erst beim naechsten Laden neu."""
+    """Remap NAM Drive values in rigs/presets using {old: new}. One transaction;
+    json_set preserves remaining content. Return changed row count.
+    The device rereads the loaded rig only on its next load."""
     if not mapping:
         return 0
     stmts = []
@@ -2302,14 +2280,14 @@ def nam_remap(br, nam, mapping):
 
 
 def nam_apply(br, nam, old, final, delete=(), replace=None, progress=None):
-    """Den NAM-Ordner in einem Zug umbauen. old: Dateinamen vorher (Reihenfolge des Geraets).
-    final: [(Quelle, Anzeigename)] in der neuen Reihenfolge - Quelle ist ein vorhandener
-    Dateiname aus old oder ein lokaler Pfad (hochladen). delete: Dateien aus old, die wegfallen.
-    replace: {Datei aus old: lokaler Pfad} - Inhalt ersetzen, Platz und Name bleiben.
-    Laedt neue Dateien unter Zwischennamen ohne .nam hoch (das Geraet sieht sie so nie halb),
-    benennt dann alles lueckenlos 'NNN - Name.nam', loescht und schreibt die Drive-Werte der
-    Rigs/Presets nach (nam_remap), damit jedes Rig sein Modell behaelt. progress(Text, Anteil
-    0..1 oder None). Liefert {'files': Anzahl, 'remapped': geaenderte Rigs/Presets}."""
+    """Rebuild the NAM folder in one operation. old: previous device-ordered filenames.
+    final: [(source, display_name)] in new order; source is an old filename or
+    local upload path. delete: old files to remove. replace: {old_file: local_path}
+    replaces content while keeping name/slot. Upload new files under temporary
+    names without .nam so partial models stay invisible. Rename contiguously
+    'NNN - Name.nam', delete, and update rig/preset Drive via nam_remap to retain
+    each rig's model. progress(text, fraction 0..1 or None).
+    Return {'files': count, 'remapped': changed_rigs_or_presets}."""
     say = progress or (lambda t, f=None: None)
     if len(final) > NAM_STEPS:
         raise LiveError("At most %d NAM models are reachable (Drive 0–100 %%)." % NAM_STEPS)
@@ -2324,7 +2302,7 @@ def nam_apply(br, nam, old, final, delete=(), replace=None, progress=None):
     oldset = set(old)
     replace = {fn: p for fn, p in (replace or {}).items() if fn in oldset}
     ups = [(i, src) for i, (src, _) in enumerate(final) if src not in oldset] + [(None, p) for p in replace.values()]
-    for _, src in ups:   # erst alles pruefen, dann schreiben
+    for _, src in ups:   # Validate everything before writing
         if not os.path.isfile(src):
             raise LiveError("File not found: %s" % src)
         if os.path.getsize(src) > NAM_MAX_MB * 1024 * 1024:
@@ -2335,7 +2313,7 @@ def nam_apply(br, nam, old, final, delete=(), replace=None, progress=None):
     cur = {}
     total = sum(os.path.getsize(src) for _, src in ups) or 1
     sent = 0
-    for k, (i, src) in enumerate(ups):   # Hochladen = 0..80 %, Umbenennen und Rigs danach
+    for k, (i, src) in enumerate(ups):   # Upload: 0..80%; rename and update rigs afterwards
         text = "Uploading %s (%d/%d) …" % (os.path.basename(src), k + 1, len(ups))
         say(text, 0.8 * sent / total)
         tmp = ".mx5b_up_%d" % k
@@ -2365,7 +2343,7 @@ def nam_apply(br, nam, old, final, delete=(), replace=None, progress=None):
 
 
 def nam_trim_text(v):
-    """Tone/Level (normiert 0..1) als Pegel wie die Mod ihn anwendet."""
+    """Convert normalized Tone/Level (0..1) to NAM's applied level."""
     import math
     v = float(v)
     if v <= 0:
@@ -2376,20 +2354,20 @@ def nam_trim_text(v):
 
 
 def nam_index_of(info):
-    """Drive-Info -> Platz 0..100."""
+    """Drive info -> slot 0..100."""
     try:
         return int(round(float(info.get("unnormalized", 0))))
     except (TypeError, ValueError):
         return 0
 
 
-# ---- Tuner (verifiziert 2026-09-17) ----
-# RedirCtrl/AccessTuner "druecken" oeffnet die Tuner-Seite am Geraet (BoardMode -> "Tuner",
-# AudioCtrl/Input/TunerOn -> On), ExitTuner schliesst sie wieder (auch ein Fussschalter am Geraet).
-# FFTCtrl/TunerString ist der Notenname ("" = kein Ton), FFTCtrl/TunerCents unnormalized die
-# Abweichung in Cents (-100..100, das Geraet zeigt -50..+50), aktualisiert alle ~35 ms; eine
-# get_many-Abfrage der Tuner-Werte dauert ~5 ms, der Editor fragt daher ~30x pro Sekunde ab.
-# TunerRef = Kammerton 410..480 Hz (IntegerValue), TunerMuting = Ausgang stumm im Tuner.
+# ---- Tuner (verified 2026-09-17) ----
+# Press RedirCtrl/AccessTuner to open (BoardMode Tuner,
+# AudioCtrl/Input/TunerOn On); ExitTuner or a physical footswitch closes it.
+# FFTCtrl/TunerString is the note (empty means no signal); TunerCents unnormalized
+# is deviation (-100..100 cents, device display -50..+50), updated ~35 ms.
+# get_many takes ~5 ms; editor polls about 30 times/s.
+# TunerRef: 410..480 Hz reference (IntegerValue); TunerMuting: mute output while tuning.
 FFT = "/Engine/FFTCtrl"
 TUNER_NOTE = FFT + "/TunerString"
 TUNER_CENTS = FFT + "/TunerCents"
@@ -2398,14 +2376,14 @@ TUNER_MUTE = "/Engine/AudioCtrl/Input/TunerMuting"
 TUNER_ON = "/Engine/AudioCtrl/Input/TunerOn"
 TUNER_PATHS = [TUNER_NOTE, TUNER_CENTS, TUNER_REF, TUNER_MUTE, BOARD]
 TUNER_REF_MIN, TUNER_REF_MAX = 410, 480
-TUNER_OK = 6.0        # |Cents| darunter gilt als gestimmt (Schwelle der Geraeteanzeige)
+TUNER_OK = 6.0        # Absolute cents below this are in tune, matching device threshold
 
 
 def tuner_open(br, before=None):
-    """Tuner-Seite am Geraet oeffnen; liefert die erste Ablesung (tuner_parse). Die Ansicht davor
-    merkt sich die Bridge-Verbindung fuer tuner_close (ExitTuner fuehrt sonst immer nach Hybrid).
-    Ist der Tuner am Geraet schon offen (dort geoeffnet), gilt before (BoardMode-Antwort der
-    letzten normalen Ansicht, vom Editor-Abgleich) als Ansicht davor."""
+    """Open the device tuner and return tuner_parse's first reading. Save the
+    previous view on the connection for tuner_close (ExitTuner otherwise returns
+    to Hybrid). If already open on device, before is the last normal BoardMode
+    reply from editor polling."""
     board = br.get(BOARD) or {}
     if board.get("string") == "Tuner":
         br.tuner_board = before
@@ -2422,8 +2400,7 @@ def tuner_open(br, before=None):
 
 
 def tuner_close(br):
-    """Tuner-Seite verlassen (nichts tun, wenn das Geraet sie schon verlassen hat) und die Ansicht
-    von vorher wiederherstellen."""
+    """Exit the tuner unless already exited, and restore the previous view."""
     if (br.get(BOARD) or {}).get("string") == "Tuner":
         press(br, RC + "/ExitTuner")
         restore_board(br, getattr(br, "tuner_board", None))
@@ -2432,7 +2409,7 @@ def tuner_close(br):
 
 
 def tuner_parse(res):
-    """get_many-Antwort der TUNER_PATHS -> {note, cents, ref, mute, active}."""
+    """TUNER_PATHS get_many reply -> {note, cents, ref, mute, active}."""
     note = (res.get(TUNER_NOTE) or {}).get("string") or ""
     cents = (res.get(TUNER_CENTS) or {}).get("unnormalized")
     ref = (res.get(TUNER_REF) or {}).get("unnormalized")
@@ -2443,13 +2420,13 @@ def tuner_parse(res):
             "active": board == "Tuner", "ok": bool(res.get("ok", True)) and TUNER_CENTS in res}
 
 
-# ---- Pegelanzeige (verifiziert 2026-09-30) ----
-# /Engine/InputMeter/Current|Peak (unnormalized dB, -120..0) und /Engine/OutputMeterL|R/Current|Peak
-# (-60..+6) sind die Pegelanzeigen der Input-/Output-Seite am Geraet. Laufend aktualisiert, Peak
-# haelt den Hoechstwert eine Weile und faellt dann langsam; get_many der Werte dauert ~5 ms.
+# ---- Level meters (verified 2026-09-30) ----
+# /Engine/InputMeter/Current|Peak (unnormalized dB, -120..0) and OutputMeterL|R/Current|Peak
+# (-60..+6) match device input/output meters. Continuously updated; Peak
+# holds briefly, then decays. get_many takes ~5 ms.
 METERS = {"Input": [("IN", "/Engine/InputMeter")],
           "Output": [("L", "/Engine/OutputMeterL"), ("R", "/Engine/OutputMeterR")]}
-METER_RANGE = {"Input": (-60.0, 0.0), "Output": (-60.0, 6.0)}   # angezeigter Bereich in dB
+METER_RANGE = {"Input": (-60.0, 0.0), "Output": (-60.0, 6.0)}   # Displayed dB range
 
 
 def meter_paths(module):
@@ -2457,7 +2434,7 @@ def meter_paths(module):
 
 
 def meter_parse(module, res):
-    """get_many-Antwort -> [(name, current_db, peak_db)] (None, wenn ein Wert fehlt)."""
+    """get_many reply -> [(name, current_db, peak_db)]; None for missing values."""
     out = []
     for name, p in METERS.get(module, []):
         cur = (res.get(p + "/Current") or {}).get("unnormalized")
@@ -2466,40 +2443,40 @@ def meter_parse(module, res):
     return out
 
 
-# ---- Looper (am Geraet verifiziert 2026-10-11, Bruecke 0.7) ----
-# Alles unter /Engine/Looper (Namen per get_many-Suche ueber alle Strings des Evil-Binaries
-# gefunden, die Looper-Seite selbst ist C++). Aktionen sind Tasten (state 1 -> 0, press):
-#   Record    RecState RecReady -> Rec (Aufnahme), beim zweiten Druck Loop schliessen und spielen
-#             (OverReady), danach Overdub an/aus (Rec <-> OverReady); jede Aufnahme = eine Ebene
-#   Play      Start/Stop (StartState Empty|Stopped|Playing; stoppt auch ein laufendes Overdub)
-#   Stop      nur Stop
-#   Undo      "PEEL": entfernt die letzte Ebene, bei nur einer Ebene ist der Loop danach leer (kein Redo)
-#   Clear     Loop loeschen (setzt auch Geschwindigkeit/Laenge zurueck)
-#   DirectionChange  vorwaerts/rueckwaerts (Reverse Normal|Reverse, PlaybackText NORMAL|REVERSE)
+# ---- Looper (verified 2026-10-11, bridge 0.7) ----
+# All under /Engine/Looper (names found by get_many over Evil binary strings;
+# the looper page itself is C++). Actions are buttons (state 1 -> 0, press):
+#   Record: RecState RecReady -> Rec; second press closes/plays the loop
+#     (OverReady), then toggles overdub (Rec <-> OverReady); each recording adds a layer
+#   Play: start/stop (StartState Empty|Stopped|Playing); also stops active overdub
+#   Stop: stop only
+#   Undo: PEEL removes the last layer; removing the sole layer empties the loop (no redo)
+#   Clear: delete loop and reset speed/length
+#   DirectionChange: forward/reverse (Reverse Normal|Reverse, PlaybackText NORMAL|REVERSE)
 #   HalfSpeed/DoubleSpeed  SpeedText x 1/4 .. x 4;  HalfLen/DoubleLen  MultText x 1 .. x 8
-#             (Laenge wirkt erst am Loop-Ende, LengthText folgt)
-# Anzeige: StateText EMPTY|RECORD|PLAY|OVERDUB|READY, RecordText RECORD|OVERDUB, PlayText START|STOP,
-#   LengthText "mm:ss.z" (waechst waehrend der Aufnahme), RelativPos unnormalized 0..100 (Position im
-#   Loop), NumLayers, Modified Y|N (seit dem Laden/Speichern veraendert), RemainingRecordingTimeString.
-# Einstellungen: Looper/Mix = Settings/LooperMix (Loop-Pegel 0..100 %, global), Looper/Feedback
-#   (0..100 %, Abklingen beim Overdub), AudioCtrl/OtherSettings/LooperLoc Pre|Post (Looper vor/nach
-#   der Kette, global), RedirCtrl/AltLooperFS Main|Alt (Belegung der Fussschalter in der Looper-Ansicht:
-#   Main FS1 Start/Stop, FS2 Record/Overdub, FS3 -> Alt; Alt FS2 Undo, FS3 -> Main).
-# Ansicht: RedirCtrl/SelectLooperMode oeffnet sie (BoardMode "Looper"), ExitLooper fuehrt nach Stomp.
-# Der Looper laeuft und laesst sich in jeder Ansicht bedienen; der Loop spielt nach dem Verlassen weiter.
-# Mute (TwoStateValue) zeigte keine Wirkung auf die Werte, Insert/InsertState ungeklaert - nicht benutzt.
-# Laden/Speichern von Loops (Ordner Loops auf dem USB-Laufwerk) geht nur ueber die GUI (LooperPage, C++).
-# Der Loop liegt nur im Speicher der App (keine Datei, keine Wellenform-Eigenschaft) - der Editor zeichnet
-# je Ebene die Huellkurve des Eingangspegels (InputMeter/Current), den er waehrend der Aufnahme mitliest.
-# RelativPos aktualisiert das Geraet alle ~30-40 ms in 1-%-Schritten; sie laeuft auch rueckwaerts
-# vorwaerts weiter (ohne Sprung beim Umschalten). LengthText beruecksichtigt Geschwindigkeit und Laenge
-# (x2 Speed: halbe Zeit), Fortschritt also 100 % / LengthText.
+#     Length changes apply at the loop end; LengthText follows
+# Display: StateText EMPTY|RECORD|PLAY|OVERDUB|READY, RecordText RECORD|OVERDUB, PlayText START|STOP;
+#   LengthText mm:ss.z grows while recording; RelativPos unnormalized 0..100
+#   is loop position; NumLayers, Modified Y|N (changed since load/save), RemainingRecordingTimeString.
+# Settings: Looper/Mix = Settings/LooperMix (global loop level 0..100%); Looper/Feedback
+#   (0..100%, overdub decay); AudioCtrl/OtherSettings/LooperLoc Pre|Post (before/after
+#   chain, global); RedirCtrl/AltLooperFS Main|Alt (looper-view footswitch layout:
+#   Main FS1 start/stop, FS2 record/overdub, FS3 -> Alt; Alt FS2 undo, FS3 -> Main).
+# View: RedirCtrl/SelectLooperMode opens BoardMode Looper; ExitLooper returns to Stomp.
+# Looper works in any view; playback continues after leaving.
+# Mute (TwoStateValue) had no observable effect; Insert/InsertState unclear and unused.
+# Load/save loops (USB drive Loops folder) only through device GUI (LooperPage, C++).
+# Loop data is app memory only, with no file/waveform property. The editor draws
+# each layer's envelope from InputMeter/Current sampled while recording.
+# RelativPos updates every ~30-40 ms in 1% steps and continues increasing in reverse,
+# without a jump when toggled. LengthText incorporates speed/length
+# (double speed halves time); progress is 100% / LengthText.
 LOOPER = "/Engine/Looper"
 LOOPER_MIX = LOOPER + "/Mix"
 LOOPER_FEEDBACK = LOOPER + "/Feedback"
 LOOPER_LOC = "/Engine/AudioCtrl/OtherSettings/LooperLoc"
 LOOPER_ALT_FS = RC + "/AltLooperFS"
-LOOPER_LEVEL = "/Engine/InputMeter/Current"     # Eingangspegel (dB) fuer die Ebenen-Huellkurven
+LOOPER_LEVEL = "/Engine/InputMeter/Current"     # Input level in dB for layer envelopes
 LOOPER_ACTIONS = {"record": "Record", "play": "Play", "stop": "Stop", "undo": "Undo", "clear": "Clear",
                   "reverse": "DirectionChange", "half_speed": "HalfSpeed", "double_speed": "DoubleSpeed",
                   "half_len": "HalfLen", "double_len": "DoubleLen"}
@@ -2510,10 +2487,10 @@ LOOPER_PATHS = [LOOPER + "/" + k for k in ("StartState", "RecState", "StateText"
 
 
 def looper_open(br, before=None, show=True):
-    """Looper-Ansicht am Geraet zeigen (show=False: nichts umschalten); liefert die erste Ablesung
-    (looper_parse). Die Ansicht davor merkt sich die Bridge-Verbindung fuer looper_close
-    (ExitLooper fuehrt sonst immer nach Stomp). Zeigt das Geraet die Looper-Ansicht schon, gilt
-    before (BoardMode-Antwort der letzten anderen normalen Ansicht) als Ansicht davor."""
+    """Show device looper (show=False leaves view unchanged); return first looper_parse
+    reading. Save prior view on the connection for looper_close (ExitLooper
+    otherwise returns to Stomp). If already open, before is the last normal
+    non-looper BoardMode reply."""
     board = br.get(BOARD) or {}
     if board.get("string") == "Looper" or not show:
         br.looper_board = before if (before or {}).get("string") not in (None, "Looper") else None
@@ -2532,8 +2509,8 @@ def looper_open(br, before=None, show=True):
 
 
 def looper_close(br):
-    """Looper-Ansicht verlassen, falls das Editor-Fenster sie gezeigt hat und das Geraet sie noch
-    zeigt, und die Ansicht von vorher wiederherstellen. Der Loop selbst laeuft weiter."""
+    """Exit device looper if this editor opened it and it is still visible,
+    restoring the previous view. Loop playback continues."""
     if getattr(br, "looper_shown", False) and (br.get(BOARD) or {}).get("string") == "Looper":
         press(br, RC + "/ExitLooper")
         restore_board(br, getattr(br, "looper_board", None))
@@ -2543,13 +2520,13 @@ def looper_close(br):
 
 
 def looper_action(br, name):
-    """Eine Looper-Taste druecken (Schluessel von LOOPER_ACTIONS); liefert die neue Ablesung."""
+    """Press a LOOPER_ACTIONS button and return the new reading."""
     press(br, "%s/%s" % (LOOPER, LOOPER_ACTIONS[name]), hold=0.06, wait=0.03)
     return looper_parse(br.get_many(LOOPER_PATHS))
 
 
 def looper_seconds(text):
-    """LengthText "mm:ss.z" -> Sekunden (None, wenn nicht lesbar)."""
+    """LengthText mm:ss.z -> seconds, or None if unreadable."""
     try:
         m, sec = (text or "").split(":")
         return int(m) * 60 + float(sec)
@@ -2558,7 +2535,7 @@ def looper_seconds(text):
 
 
 def looper_parse(res):
-    """get_many-Antwort der LOOPER_PATHS -> dict mit Zustand, Texten und Einstellungen."""
+    """LOOPER_PATHS get_many reply -> state, text and settings dictionary."""
     def g(k, field="string"):
         return (res.get(k if k.startswith("/") else LOOPER + "/" + k) or {}).get(field)
     pos = g("RelativPos", "unnormalized")
@@ -2581,30 +2558,30 @@ def looper_parse(res):
             "seconds": looper_seconds(g("LengthText")), "ok": bool(res.get("ok", True)) and LOOPER + "/StartState" in res}
 
 
-# ---- Hardware-Zuweisungen (Fussschalter, Scenes, Expression-Pedale) ----
+# ---- Hardware assignments (footswitches, scenes, expression pedals) ----
 #
-# Fussschalter 1-3 des MX5 sind /Engine/FootSwitch/...5, 6, 7. Je Schalter:
-#   ModeNew (Toggle|Scene), UserFootSwitchText (Beschriftung), im Toggle-Modus
-#   ModuleList/OperationList (Auswahllisten, setzen Module/Operation), im
-#   Scene-Modus SceneNumberOfStates (1-2), MacroColour/State2MacroColour und
-#   Scene/State2Scene mit slot(0..10) = {effect, mode}; mode 0 = unveraendert,
-#   1 = an, 2 = aus. Nur belegte Kettenplaetze setzen - ein Zustand auf einem
-#   leeren Platz hat beim Ausloesen die Geraete-App abstuerzen lassen.
-#   Dazu je Platz das Text-Property Scene<n>Slot<k>Preset (Zustand 2:
-#   State2Scene<n>Slot<k>Preset): Name eines Block-Presets (Tabelle blocks,
-#   Typ des Blocks), das beim Ausloesen der Scene in den Block geladen wird;
-#   "No Preset" = keins, leere Plaetze liefern "". Das Geraet prueft den Namen
-#   nicht (am Geraet 2026-09-17 geprueft: Preset WARM wurde per Fussschalter
-#   geladen, PresetName und Parameter des Blocks folgten).
-# Pedal1 (eingebaut) / Pedal2 (extern): je 4 Zuweisungen ModuleList/ParamList
-#   (setzen Module/Param), Min/Max in Prozent; Pedal1 hat PedalMode Classic|Advanced.
-# Zuweisungsaenderungen setzen Rigs/Dirty am Geraet selbst.
-# Anzeige der Schalter wie auf dem Display (am Geraet 2026-09-17 geprueft): FootSwitchText<n>
-#   = gezeigter Text (Beschriftung, sonst Blockname), FootSwitchColour<n> = gezeigte Farbe
-#   (folgt bei zwei Zustaenden dem aktiven, SceneState<n> = 0/1), FootSwitch<n> state = leuchtet
-#   (zuletzt ausgeloeste Scene bzw. Block an). Ein Druck geht in der Stomp-Ansicht ueber
-#   RedirCtrl/RawFootswitches/FS1-3 (press_footswitch). Pedalboard: FootSwitch1-8 an FS2-5/FS8-11
-#   (Geraeteprofil oben, FS_NUMBERS/DEV.raw).
+# MX5 switches 1-3 map to /Engine/FootSwitch/...5,6,7. Per switch:
+#   ModeNew Toggle|Scene, UserFootSwitchText label; Toggle uses
+#   ModuleList/OperationList choices, setting Module/Operation;
+#   Scene uses SceneNumberOfStates 1-2, MacroColour/State2MacroColour,
+#   Scene/State2Scene slot(0..10)={effect, mode}; 0 unchanged,
+#   1 on, 2 off. Set only occupied chain slots: assigning a mode to
+#   an empty slot crashed the device when triggered.
+#   Each slot also has Scene<n>Slot<k>Preset (second state:
+#   State2Scene<n>Slot<k>Preset): block preset name from the blocks table
+#   for that block type, loaded when the scene triggers.
+#   'No Preset' means none; empty slots return ''. The device does not
+#   validate names (2026-09-17: WARM loaded by footswitch,
+#   updating the block's PresetName and parameters).
+# Pedal1 internal/Pedal2 external: four ModuleList/ParamList assignments
+#   setting Module/Param and percentage Min/Max; Pedal1 has PedalMode Classic|Advanced.
+# Assignment changes set Rigs/Dirty on the device.
+# Switch display (verified 2026-09-17): FootSwitchText<n>
+#   is label or block name; FootSwitchColour<n> is displayed color
+#   and follows active state in two-state scenes (SceneState<n>=0/1); FootSwitch<n> state
+#   indicates lit status (last scene triggered or block on). Press in Stomp via
+#   RedirCtrl/RawFootswitches/FS1-3 (press_footswitch). Pedalboard: FootSwitch1-8 -> FS2-5/FS8-11
+#   according to the device profile (FS_NUMBERS/DEV.raw).
 
 HW_FS, HW_PEDAL = "Footswitches", "Pedals"
 HW_MODULES = [HW_FS, HW_PEDAL]
@@ -2616,12 +2593,12 @@ FS_DISPLAY = ("FootSwitchText%d", "FootSwitchColour%d", "FootSwitch%d")
 
 
 def fs_display_paths():
-    """Die Anzeige-Properties der Fussschalter (Text, Farbe, leuchtet; MX5 3 x 3)."""
+    """Footswitch display properties: text, color, lit state (MX5: 3 x 3)."""
     return ["%s/%s" % (FSW, k % n) for n in FS_NUMBERS for k in FS_DISPLAY]
 
 
 def fs_display(values):
-    """Anzeige der Schalter aus gelesenen Werten: {n: {text, colour, on}}; None, solange nichts gelesen ist."""
+    """Read switch values -> {n: {text, colour, on}}, or None until read."""
     out = {}
     for n in FS_NUMBERS:
         t, c, o = ((values.get("%s/%s" % (FSW, k % n)) or {}) for k in FS_DISPLAY)
@@ -2632,9 +2609,9 @@ def fs_display(values):
 
 
 def press_footswitch(br, n):
-    """Fussschalter FootSwitch<n> (MX5 5-7) am Geraet druecken wie ein Tritt auf den Schalter
-    (RawFootswitches laut DEV.raw) - nur in der Stomp-Ansicht, sonst wuerde der Druck einen
-    Dialogknopf treffen. Liefert die neue Anzeige."""
+    """Press FootSwitch<n> (MX5 5-7) like a physical press via DEV.raw.
+    Stomp view only, to avoid accidentally pressing a dialog button.
+    Return the new display state."""
     board = (br.get(BOARD) or {}).get("string")
     if board != "Stomp":
         raise LiveError("The device currently shows '%s', not the stomp view." % board)
@@ -2647,12 +2624,12 @@ def scene_path(n, state):
 
 
 def scene_preset_path(n, state, slot):
-    """Preset-Property eines Kettenplatzes (0-basiert) einer Scene."""
+    """Preset property for a scene's zero-based chain slot."""
     return "%s/%sScene%dSlot%dPreset" % (FSW, "State2" if state == 2 else "", n, slot + 1)
 
 
 def read_scene_slots(br, n, state):
-    """[(blockname, mode, preset)] der 11 Kettenplaetze einer Scene; preset "" = keins."""
+    """[(blockname, mode, preset)] for 11 scene slots; empty preset means none."""
     js = ('var t = App.getProperty("%s").translator; var o = []; for (var i = 0; i < %d; i++) '
           '{ var s = t.slot(i); o.push([s.effect, s.mode]); } return JSON.stringify(o);' % (scene_path(n, state), SLOTS))
     slots = [(e, int(m)) for e, m in json.loads(br.eval(js))]
@@ -2666,7 +2643,7 @@ def read_scene_slots(br, n, state):
 
 
 def set_scene_slot(br, n, state, slot, mode):
-    """mode eines Kettenplatzes (0-basiert) setzen; leere Plaetze werden verweigert."""
+    """Set a zero-based chain slot's mode; reject empty slots."""
     js = ('var s = App.getProperty("%s").translator.slot(%d); if (s.effect === "%s") return "leer"; '
           's.mode = %d; return String(s.mode);' % (scene_path(n, state), slot, EMPTY, mode))
     r = br.eval(js)
@@ -2676,8 +2653,8 @@ def set_scene_slot(br, n, state, slot, mode):
 
 
 def set_scene_preset(br, n, state, slot, name):
-    """Preset (Name, "" = keins) eintragen, das die Scene in den Block auf Platz slot (0-basiert)
-    laedt. Liefert den eingetragenen Namen ("" = keins)."""
+    """Set the preset loaded by a scene at zero-based slot. Empty name means none.
+    Return the stored name, empty for none."""
     r = br.set(scene_preset_path(n, state, slot), "string", name or NO_SCENE_PRESET)
     if not r.get("ok"):
         raise LiveError("Preset not set: %s" % r.get("err"))
@@ -2700,9 +2677,9 @@ FS_LISTS = {"modes": "ModeNew%d", "modules": "ModuleList%d", "operations": "Oper
 PEDAL_KEYS = {"module": "ModuleList%d", "param": "ParamList%d", "min": "Min%d", "max": "Max%d"}
 PEDAL_LISTS = {"modules": "ModuleList%d", "params": "ParamList%d"}
 
-# Liest alles fuer read_hardware in einem eval (vorher ~55 Einzelanfragen, 250 ms). V = Pfade fuer
-# infoOf, E = Pfade fuer entriesOf (fehlt die Liste: []), S = Scene-Pfade (slot 0..10),
-# P = Scene-Preset-Pfade (nur der Text).
+# Read all hardware in one eval (previously ~55 requests, 250 ms). V: infoOf paths;
+# E: entriesOf paths (missing list -> []); S: scene paths (slots 0..10);
+# P: scene preset paths (text only).
 _HW_JS = ('var V = %s, E = %s, S = %s, P = %s, o = {v: {}, e: {}, s: {}, p: {}}; '
           'for (var i = 0; i < V.length; i++) o.v[V[i]] = device.infoOf(V[i]); '
           'for (var i = 0; i < E.length; i++) { try { o.e[E[i]] = device.entriesOf(E[i]); } catch (x) { o.e[E[i]] = []; } } '
@@ -2713,8 +2690,8 @@ _HW_JS = ('var V = %s, E = %s, S = %s, P = %s, o = {v: {}, e: {}, s: {}, p: {}};
 
 
 def read_hardware(br):
-    """Alle Hardware-Zuweisungen des aktiven Rigs lesen (Werte, Auswahllisten, Scenes) - in
-    einem eval statt ~55 Einzelanfragen."""
+    """Read all active-rig hardware assignments (values, choices, scenes)
+    in one eval instead of ~55 requests."""
     vals, lists, scenes = [], [], []
     for n in FS_NUMBERS:
         vals += ["%s/%s" % (FSW, k % n) for k in FS_KEYS.values()]
@@ -2757,20 +2734,20 @@ def read_hardware(br):
     return hw
 
 
-# ---- Bloecke verschieben (am Geraet 2026-09-29 geprueft) ----
+# ---- Move blocks (verified 2026-09-29) ----
 #
-# Die Original-Oberflaeche (BlockMove.js im Evil-Binary) setzt nur ModuleType<k>.index:
-# ein Typ, der schon auf einem anderen Platz steht, wandert dorthin (Parameter bleiben).
-# Ein belegtes Ziel wird dabei *ersetzt* - aber jeder Blocktyp ist eine feste Instanz:
-# wird er spaeter wieder eingesetzt, sind Parameter, An/Aus, Farbe und Pedal-Zuweisung
-# wieder da. Verloren gehen nur seine Scene-Eintraege (Modus/Preset je Fussschalter),
-# darum sichert move_chain sie vorher und stellt sie danach nach Blockname wieder her.
-# Aendern per index setzt Rigs/Dirty nicht (die Oberflaeche setzt es selbst).
+# Original UI BlockMove.js only sets ModuleType<k>.index:
+# an already-present type moves to the target, retaining parameters.
+# An occupied target is replaced, but each block type is a fixed instance:
+# reinsert it later and parameters/on/color/pedal assignments remain.
+# Only scene entries (mode/preset per footswitch) are lost,
+# so move_chain saves them first and restores by block name afterwards.
+# Changing index does not set Rigs/Dirty; the UI sets it explicitly.
 
 def plan_block_move(chain, src, dst):
-    """Kette nach dem Ziehen von Platz src auf dst (1-basiert) - wie am Geraet: ist dst frei,
-    wandert der Block dorthin; sonst ruecken die Bloecke ab dst bis zur naechsten Luecke
-    (Richtung src bzw. nach hinten) einen Platz auf; ohne Luecke werden die beiden getauscht."""
+    """Chain after dragging one-based src to dst: move directly if empty;
+    otherwise shift from dst toward the next gap (toward src or the end).
+    If no gap exists, swap both blocks, matching device behavior."""
     c = list(chain)
     i, j = src - 1, dst - 1
     m = c[i]
@@ -2790,9 +2767,8 @@ def plan_block_move(chain, src, dst):
 
 
 def chain_writes(cur, desired):
-    """Schreibfolge [(platz, name)] von cur nach desired (gleiche Bloecke, andere Plaetze).
-    Bevorzugt Zuege auf freie Plaetze; nur ohne freien Platz wird ein Block verdraengt und
-    spaeter wieder eingesetzt."""
+    """Writes [(slot, name)] from cur to desired with the same blocks reordered.
+    Prefer empty targets; only displace/reinsert a block if no empty slot exists."""
     work, out, writes = list(cur), set(), []
     assert sorted(m for m in cur if m) == sorted(m for m in desired if m), "andere Bloecke"
     while work != desired:
@@ -2809,10 +2785,10 @@ def chain_writes(cur, desired):
             continue
         k0 = next(k for k in range(len(work)) if desired[k] and work[k] != desired[k])
         free = [k for k in range(len(work)) if work[k] is None]
-        if free:   # Block von k0 auf einen freien Platz parken
+        if free:   # Park block k0 in an empty slot
             work[free[0]], work[k0] = work[k0], None
             writes.append((free[0] + 1, work[free[0]]))
-        else:      # Kette voll: Ziel ueberschreiben, der dortige Block kommt spaeter wieder
+        else:      # Full chain: overwrite target, then reinsert the displaced block
             name = desired[k0]
             if name in work:
                 work[work.index(name)] = None
@@ -2835,9 +2811,9 @@ def _move_js(body, **kw):
 
 
 def move_chain(br, desired, types):
-    """Kette am Geraet in die Reihenfolge desired bringen (Blocknamen, None = leer), ohne
-    Parameter oder Scene-Eintraege zu verlieren. types = Auswahlliste von ModuleType.
-    Liefert {"chain": [...], "writes": n, "fixed": n} (fixed = wiederhergestellte Eintraege)."""
+    """Reorder the device chain to desired (block names, None=empty) without losing
+    parameters/scenes. types is the ModuleType choice list.
+    Return {'chain': [...], 'writes': n, 'fixed': restored_scene_entries}."""
     snap = json.loads(br.eval(_move_js(
         'var c = chain(), k = {}; '
         'for (var a = 0; a < FS.length; a++) for (var s = 1; s <= 2; s++) { var t = sc(FS[a], s); '
@@ -2851,9 +2827,9 @@ def move_chain(br, desired, types):
     idx = [[k, types.index(name)] for k, name in writes]
     br.eval(_move_js('var W = %s; for (var i = 0; i < W.length; i++) tr("%s/Chain/ModuleType" + W[i][0]).index = W[i][1]; '
                      'tr("%s/Dirty").state = true; return "";' % (json.dumps(idx), ENGINE, RIGS)))
-    time.sleep(0.1)   # die Engine zieht die Scene-Eintraege verschobener Bloecke selbst nach
-    # Scene-Eintraege nach Blockname wiederherstellen: nur belegte Plaetze bekommen einen Modus,
-    # leere werden auf 0 gesetzt (ein Modus auf leerem Platz kann die App abstuerzen lassen)
+    time.sleep(0.1)   # The engine updates moved blocks' scene entries itself
+    # Restore scene entries by block name: modes only on occupied slots;
+    # empty slots get mode 0 because a mode on an empty slot may crash the app
     res = json.loads(br.eval(_move_js(
         'var K = %s, c = chain(), fixed = 0; '
         'for (var a = 0; a < FS.length; a++) for (var s = 1; s <= 2; s++) { var t = sc(FS[a], s); '
@@ -2872,33 +2848,33 @@ def move_chain(br, desired, types):
 
 
 class LiveRig:
-    """Abbild des aktiven Rigs am Geraet (Zwischenspeicher der gelesenen Werte)."""
+    """Cached view of the device's active rig."""
 
     def __init__(self, session, catalog):
         self.session = session
         self.catalog = catalog
-        self.values = {}          # voller Pfad -> letzte Antwort
+        self.values = {}          # Full path -> latest reply
         self.slots = [None] * SLOTS
         self.name = "?"
         self.rig_id = None
         self.routing = "?"
         self.dirty = False
-        self.marking_dirty = False   # Rigs/Dirty wird gerade gesetzt
+        self.marking_dirty = False   # Rigs/Dirty write in progress
         self.loaded_modules = set()
-        self.setlists = []        # Namen der Setlists am Geraet (ohne ALL_RIGS)
-        self.setlist = None       # aktive Setlist oder ALL_RIGS
-        self.setlist_sure = False # False = nur vermutet (Geraet meldet die aktive Setlist nicht)
-        self.setlist_ids = None   # Setlist-Name -> Datenbank-ID
-        self.rows = []            # Datenbankzeilen der aktiven Rig-Liste in Geraete-Reihenfolge
-        self.block_types = None   # Auswahlliste fuer ModuleType (einmal gelesen)
-        self.presets = None       # Block-Presets {TYP: [{id, type, name, readonly}]} (db_preset_names), None = ungelesen
-        self.hw = None            # Hardware-Zuweisungen (read_hardware), None = nicht gelesen
+        self.setlists = []        # Device setlist names excluding ALL_RIGS
+        self.setlist = None       # Active setlist or ALL_RIGS
+        self.setlist_sure = False # False means inferred/uncertain; device does not report active setlist
+        self.setlist_ids = None   # Setlist name -> database ID
+        self.rows = []            # Active rig-list database rows in device order
+        self.block_types = None   # ModuleType choice list, read once
+        self.presets = None       # Block presets {TYPE: [{id,type,name,readonly}]} from db_preset_names; None until read
+        self.hw = None            # Hardware assignments from read_hardware; None until read
         self.hw_loading = False
-        self.nam = None           # NAM-Zustand (nam_status), None = ungelesen
-        self.nam_models = None    # NAM-Modelle in Geraete-Reihenfolge (db_nam_models()['models']), None = ungelesen
+        self.nam = None           # NAM status from nam_status; None until read
+        self.nam_models = None    # Device-ordered NAM models from db_nam_models()['models']; None until read
 
     def apply_rig_list(self, res):
-        """Ergebnis von read_rig_list / enter_setlist / refresh_lists uebernehmen."""
+        """Apply read_rig_list/enter_setlist/refresh_lists result."""
         self.setlists = res["setlists"]
         self.setlist = res["setlist"]
         self.setlist_sure = res["sure"]
@@ -2908,7 +2884,7 @@ class LiveRig:
     def setlist_choices(self):
         return [ALL_RIGS] + self.setlists
 
-    # ---- Pfade ----
+    # ---- Paths ----
     @staticmethod
     def path(module, param):
         return "%s/%s/%s" % (ENGINE, module, param)
@@ -2917,14 +2893,14 @@ class LiveRig:
     def slot_path(slot):
         return "%s/Chain/ModuleType%d" % (ENGINE, slot)
 
-    # ---- Kopfdaten ----
+    # ---- Header data ----
     def overview_paths(self):
         paths = ["%s/Rig/PresetName" % ENGINE, "%s/Chain/Routing" % ENGINE, "%s/Dirty" % RIGS, "%s/LoadedID" % RIGS]
         paths += [self.slot_path(i) for i in range(1, SLOTS + 1)]
         return paths
 
     def apply_overview(self, path, info):
-        """Gibt True zurueck, wenn sich Rig oder Kette geaendert haben."""
+        """Return True if rig or chain changed."""
         if not info.get("ok"):
             return False
         s = info.get("string", "")
@@ -2952,36 +2928,36 @@ class LiveRig:
         return [(i + 1, m) for i, m in enumerate(self.slots)]
 
     def modules(self):
-        """Bloecke der Kette plus Rig/Eingang/Ausgang (ohne die Hardware-Seiten)."""
+        """Chain blocks plus Rig/Input/Output, excluding hardware pages."""
         return [m for m in self.slots if m] + SPECIAL_MODULES
 
     def has_module(self, module):
         return module in self.slots or module in SPECIAL_MODULES or module in HW_MODULES
 
-    # ---- Rig-Liste ----
+    # ---- Rig list ----
     def rigs(self):
-        """[(index, Anzeigename, Farbname, ID)] der aktiven Liste."""
+        """[(index, display_name, color_name, ID)] for the active list."""
         return [(i, display_name(r["name"]), RIG_COLOURS[int(r.get("color") or 0)]
                  if 0 <= int(r.get("color") or 0) < len(RIG_COLOURS) else "Off", r["id"])
                 for i, r in enumerate(self.rows)]
 
     def row(self, rig_id):
-        """Datenbankzeile eines Rigs der aktiven Liste (erstes Vorkommen) oder None."""
+        """First matching rig row in the active list, or None."""
         return next((r for r in self.rows if r["id"] == rig_id), None)
 
     def prog_of(self, rig_id):
         r = self.row(rig_id)
         return _prog(r) if r else None
 
-    # ---- Parameter ----
+    # ---- Parameters ----
     def params(self, module):
-        """Parameternamen aus dem Katalog (Geraete-Reihenfolge, soweit bekannt)."""
+        """Catalog parameter names in device order where known."""
         entry = self.catalog.modules.get(module) or self.catalog.modules.get(self.catalog.base(module)) or {}
         order = list(entry.get("order", []))
         order += sorted(k for k in entry.get("params", {}) if k not in order)
         if module in SPECIAL_MODULES or entry:
             return [p for p in order if p not in HIDDEN_PARAMS]
-        return ["On", "Colour"]  # unbekannter Blocktyp: wenigstens die Grundfunktionen
+        return ["On", "Colour"]  # Unknown block type: provide at least the basic controls
 
     def info(self, module, param):
         return self.values.get(self.path(module, param))
@@ -3001,7 +2977,7 @@ class LiveRig:
         return None if i is None else bool(i.get("state"))
 
     def fs_display(self):
-        """Anzeige der drei Fussschalter (fs_display), None solange nicht gelesen."""
+        """Three footswitches' fs_display state, or None until read."""
         return fs_display(self.values)
 
     def colour(self, module):
