@@ -31,20 +31,20 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 IN=$(realpath "$1")
 OUT=$(realpath -m "$2")
 INST=${3:-2}
-[ "$INST" = 2 ] || [ "$INST" = 4 ] || die "Instanzen muessen 2 oder 4 sein, nicht '$INST'"
-[ -f "$IN" ] || die "Eingabe fehlt: $IN"
-[ "$IN" != "$OUT" ] || die "Eingabe und Ausgabe muessen verschieden sein"
+[ "$INST" = 2 ] || [ "$INST" = 4 ] || die "Instances must be 2 or 4, not '$INST'"
+[ -f "$IN" ] || die "Input missing: $IN"
+[ "$IN" != "$OUT" ] || die "Input and output must differ"
 
 # Check tools (one apt command for all missing dependencies)
-fehlt=""
+missing=""
 for c in curl tar bzip2 cmake cc make sha256sum; do
-	command -v "$c" >/dev/null 2>&1 || fehlt="$fehlt $c"
+	command -v "$c" >/dev/null 2>&1 || missing="$missing $c"
 done
 for h in ext2fs/ext2fs.h blkid/blkid.h uuid/uuid.h lzma.h curl/curl.h; do
 	[ -f "/usr/include/$h" ] || [ -n "$(find /usr/include -path "*/$h" -print -quit 2>/dev/null)" ] \
-		|| fehlt="$fehlt $h"
+		|| missing="$missing $h"
 done
-[ -z "$fehlt" ] || die "es fehlt:$fehlt
+[ -z "$missing" ] || die "Missing:$missing
   sudo apt install -y cmake gcc make bzip2 curl libext2fs-dev libblkid-dev uuid-dev liblzma-dev libcurl4-openssl-dev"
 
 # 1. NAM source (version REF) from GitHub
@@ -58,12 +58,12 @@ if [ ! -f "$SRC/CMakeLists.txt" ]; then
 	rm -rf "$SRC"; mkdir -p "$SRC"
 	tar -xzf "$TGZ" -C "$SRC" --strip-components=1
 fi
-[ -f "$SRC/tools/gui_core_cli.c" ] || die "$SRC ist keine NAM-Mod (tools/gui_core_cli.c fehlt)"
+[ -f "$SRC/tools/gui_core_cli.c" ] || die "$SRC is not a NAM mod source tree (tools/gui_core_cli.c missing)"
 cd "$SRC"
 
 # 2. ARM toolchain specified by NAM
 TC_URL=$(sed -n 's/^ARG TOOLCHAIN_URL=//p' docker/Dockerfile | head -n 1)
-[ -n "$TC_URL" ] || die "TOOLCHAIN_URL nicht in docker/Dockerfile gefunden"
+[ -n "$TC_URL" ] || die "TOOLCHAIN_URL not found in docker/Dockerfile"
 TC=$WORK/$(basename "$TC_URL" .tar.bz2)
 if [ ! -x "$TC/bin/arm-buildroot-linux-gnueabihf-g++" ]; then
 	echo "Downloading ARM toolchain $(basename "$TC_URL") ..."
@@ -85,7 +85,7 @@ touch blobs/*   # Otherwise CMake rebuilds them with Docker, as in the NAM CI
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release >/dev/null
 cmake --build build --target gui-core-cli --parallel >/dev/null
 CLI=$SRC/build/gui-core-cli
-[ -x "$CLI" ] || die "gui-core-cli wurde nicht gebaut"
+[ -x "$CLI" ] || die "gui-core-cli was not built"
 
 # 5. Patching
 echo "Applying NAM mod $REF (MX5, $INST instances) ..."

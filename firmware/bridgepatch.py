@@ -182,9 +182,9 @@ def patch_evil(text):
     need(bool(nam) == (NAM_BLOCK in text), 'NAM start line and NAM comment block do not match')
     start = EVIL_START
     if nam:
-        start = ('\t### NAM-Mod (github.com/lolgab/headrush-nam-mod) nur, wenn eingeschaltet\n'
+        start = ('\t### NAM mod (github.com/lolgab/headrush-nam-mod), only when enabled\n'
                  '\tif %s nam; then\n\t%s\telse\n\t%s\tfi\n' % (DBHOOK, nam, EVIL_START))
-    patch = ('\t### MX5 Bridge: Sicherung zurueckspielen (falls angefordert), Absturzzaehler, Neustart-Marker\n'
+    patch = ('\t### MX5 Bridge: requested recovery, crash counter, restart marker\n'
              '\t%s prestart\n'
              '\tmx5bStart=$(date +%%s)\n'
              '%s'

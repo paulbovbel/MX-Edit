@@ -91,7 +91,7 @@ Device {
 		for (var k = 0; k < parts.length; k++)
 			s += parts[k].substr(parts[k].indexOf("_") + 1);
 		var text = Qt.atob(s.replace(/-/g, "+").replace(/_/g, "/"));
-		JSON.parse(text);   // pruefen (z. B. zwei Ergebnismengen einer Abfrage -> kein JSON)
+		JSON.parse(text);   // Validate: e.g. two SQL result sets do not form valid JSON.
 		return text;
 	}
 
@@ -260,7 +260,7 @@ Device {
 
 		rxCount++;
 		var seq = b[4];
-		var longHdr = (b[5] & 0x20) !== 0;   // Antwort mit 14-Bit-Teilezaehler (ab 0.6)
+		var longHdr = (b[5] & 0x20) !== 0;   // Reply with 14-bit part counters (0.6+)
 		var cmd = b[5] & 0x1F;
 		var end = b[b.length - 1] === 0xF7 ? b.length - 1 : b.length;
 		var payload = "";

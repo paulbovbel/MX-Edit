@@ -12,9 +12,10 @@ Usage:
                                            folder (default: mac on macOS, else win - HeadRush has
                                            no Linux updater, on Linux flash from Windows or a VM)
 
-Reines Python 3 (Standardbibliothek); entpackt den 7z-Updater mit sevenzip.py (Rueckfall: tar.exe
-von Windows, 7z, bsdtar), schreibt das ext4-rootfs mit ext4.py (statt debugfs)
-und komprimiert mit xzblocks.py wie das Original. Was geaendert wird: bridgepatch.py."""
+Pure Python 3 (standard library): extracts the 7z updater using sevenzip.py
+(fallbacks: Windows tar.exe, 7z, bsdtar), writes ext4 with ext4.py instead of
+debugfs, and compresses like stock firmware with xzblocks.py.
+The changes are defined in bridgepatch.py."""
 import argparse, hashlib, json, lzma, os, shutil, stat, subprocess, sys, tempfile, time, urllib.request, zipfile, zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

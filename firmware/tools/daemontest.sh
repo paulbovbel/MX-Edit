@@ -48,13 +48,13 @@ ask q "select id from rigs order by id"; expect 'len(r["rows"]) == 3'
 ask w "delete from rigs where id='r1'"
 ask q "select rig_id from setlist_rigs order by rig_id"; expect '[x["rig_id"] for x in r["rows"]] == ["r2"]'
 ask a "backup"; expect 'r["ok"] and r["rows"][0]["backup_kb"] > 0'
-ask a "unsinn"; expect 'not r["ok"] and "unbekannte Aktion" in r["err"]'
+ask a "nonsense"; expect 'not r["ok"] and "unknown action" in r["err"]'
 # New in 0.6
 ask q "select 'Grüße € \"x\" ' || char(92) || ' tab' || char(9) || 'ende' as t"; expect 'r["rows"][0]["t"] == "Grüße € " + chr(34) + "x" + chr(34) + " " + chr(92) + " tab" + chr(9) + "ende"'
 ask q "select readfile('/etc/hostname') as f"; expect 'not r["ok"]'
 ask q "select 1 from fsdir('/tmp')"; echo "    (fsdir: allowed read-only in device sqlite 3.53 even with -safe)"
 ask q ".system echo pwned"; expect 'not r["ok"] or "pwned" not in json.dumps(r)'
-ask q "with recursive c(i) as (select 1 union all select i+1 from c where i < 3000) select i, 'Zeile mit etwas Text und Umlaut ä' as t from c"; expect 'len(r["rows"]) == 3000'
+ask q "with recursive c(i) as (select 1 union all select i+1 from c where i < 3000) select i, 'A row with accented text: ä' as t from c"; expect 'len(r["rows"]) == 3000'
 echo "    (3000 rows = $(wc -c < "$T/reply.json") bytes of JSON)"
 ask s "echo hello; echo error >&2; exit 3"; expect 'r["rows"][0]["rc"] == 3 and "hello" in r["rows"][0]["out"] and "error" in r["rows"][0]["out"]'
 ask s 'x=a; b=$(printf "%s" "\\"); printf "%s%s%sc	E
@@ -80,7 +80,7 @@ touch "$T/tmp/restart"; busybox sh "$T/db.sh" postexit 143 $now; ls "$T/tmp"
 # NAM mod (0.7): absent without library; toggling rejected
 rm -f "$T/tmp/restart"
 ask a "status"; expect 'r["rows"][0]["nam_installed"] == 0 and r["rows"][0]["nam_on"] == 0'
-ask a "nam-on"; expect 'not r["ok"] and "nicht enthalten" in r["err"]'
+ask a "nam-on"; expect 'not r["ok"] and "does not include NAM" in r["err"]'
 busybox sh "$T/db.sh" nam && { echo "!!! nam succeeds without a library"; FAIL=1; } || echo "    ok: nam without library -> disabled"
 mkdir -p "$T/nam"; touch "$T/nam/libnam_preload.so"; printf 'nam_mod_ref=v0.1.6\nnam_instanzen=2\n' > "$T/nam/info.txt"
 busybox sh "$T/db.sh" nam && echo "    ok: nam enabled -> yes" || { echo "!!! nam reports disabled"; FAIL=1; }
