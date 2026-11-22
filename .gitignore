@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
+result
+result-*
 
 # Patcher: downloaded official updater and generated updater folders
 firmware/HeadRush_*_Updater*.zip

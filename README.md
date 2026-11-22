@@ -17,6 +17,24 @@
 
 ## Installation
 
+### Nix (Linux editor)
+
+From a checkout of this repository:
+
+```sh
+nix run .#mx-edit
+# Offline: open a folder of backed-up rigs
+nix run .#mx-edit -- /path/to/Rigs
+```
+
+Available for x86_64 and aarch64 Linux. Python, Tkinter, Pillow and the MIDI
+backend are included. `nix build .#mx-edit` builds the package; `nix flake check`
+also smoke-tests GUI startup on a virtual display without contacting a device.
+This packages **only the editor**: it does not build, download or flash firmware.
+Live editing requires the bridge firmware described below; offline editing does not.
+
+### Firmware and release builds
+
 You need a HeadRush **MX5 on firmware 2.7** (Pedalboard: see
 [below](#headrush-pedalboard-beta)), its power supply, a USB cable and a Windows 10/11 PC
 (Mac or Linux: see [macOS and Linux](#macos-and-linux)). It takes about 15 minutes. There is also a [video guide on YouTube](https://youtu.be/6ivzolrPEZA?si=BKzsChsaO2G2xgYX).
