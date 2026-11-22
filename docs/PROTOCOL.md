@@ -35,6 +35,24 @@ F0 7D 48 52 <seq> <code> <part hi> <part lo> <total hi> <total lo> <text> F7   l
 
 Join the parts in order. `<code>` `0x7F` means error, and the text is then the message.
 
+### Large requests from MX-Edit
+
+Linux's ALSA sequencer can reject a large outgoing SysEx event even though small
+parameter edits work. The client limits each complete outgoing message to 4096
+bytes. For larger requests on bridge ≥ 0.6, it uses small, acknowledged EVALs to
+stage the exact original MIDI frame as ASCII hex in a temporary, non-enumerable
+property of `device.sqlPending`. The property is invisible to the firmware's
+pending-SQL polling loop.
+
+A final EVAL joins and removes the staged data, then calls the existing
+`device.sysEx` dispatcher once. The relay uses sequence 0; its acknowledgement
+is ignored while the client waits for the original request's sequence number.
+The original command, Unicode encoding, reply framing, database backup and
+transaction behavior are unchanged. Dispatch is not automatically retried on a
+send failure, since a write could already have executed. No firmware update is
+needed on bridge ≥ 0.6; older firmware reports an actionable error for oversized
+requests instead.
+
 **Characters outside ASCII** (bridge ≥ 0.5): SysEx carries only 7 bits, so every character
 other than TAB, LF and 0x20–0x7E travels as byte `0x7F` followed by four uppercase hex digits
 (one UTF-16 code unit; characters outside the BMP become surrogate pairs). This applies in

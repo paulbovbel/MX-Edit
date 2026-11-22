@@ -15,13 +15,17 @@ Bruecke 0.6 ueber den Befehl SHELL (Daten base64); 0.3 bis 0.5 ueber den
 SQL-Lesekanal, dessen sqlite3-Shell readfile()/writefile()/fsdir() und den
 Punktbefehl .system (eine Shell-Zeile als root) kennt.
 """
-import base64, json, re, time
+import base64, json, re, time, uuid
 
 HDR = [0x7D, 0x48, 0x52]
 _ESCAPED = re.compile("\x7f([0-9A-Fa-f]{4})")
 KEYWORDS = ["mx5", "headrush", "gadget", "f_midi", "midi function"]
 MAX_REPLY = 40000   # geschaetzte Antwortgroesse je Sammelabfrage (Grenze der Bruecke: 127 x 380 Zeichen)
 PER_VALUE = 220     # Antwortzeichen je Wert zusaetzlich zum Pfad (gemessen ~130-160)
+# Bound complete outgoing messages, including F0/F7. ALSA's sequencer output
+# pool can reject a whole rig (SQL hex literals make it roughly twice as big).
+MAX_REQUEST = 4096
+STAGE_CHUNK = 3000
 
 
 class BridgeError(Exception):
@@ -88,10 +92,14 @@ class Bridge:
         if self.inp.closed or self.out.closed:   # send() auf geschlossenem rtmidi-Port stuerzt ab
             raise BridgeError("MIDI-Port geschlossen")
         self.seq = self.seq % 127 + 1
+        seq = self.seq
         long_hdr = self.long and cmd != 0x01   # der Ping antwortet immer kurz (Version noch unbekannt)
-        data = HDR + [self.seq, cmd | (0x20 if long_hdr else 0)] + \
+        data = HDR + [seq, cmd | (0x20 if long_hdr else 0)] + \
             [ord(c) & 0x7F for c in (escape(text) if self.unicode else text)]
-        self.out.send(self.mido.Message("sysex", data=data))
+        if len(data) + 2 > MAX_REQUEST:
+            self._send_staged(data)
+        else:
+            self._send_message(data)
         parts, total = {}, None
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -99,7 +107,7 @@ class Bridge:
                 if m.type != "sysex":
                     continue
                 d = list(m.data)
-                if d[:3] != HDR or len(d) < 5 or d[3] != self.seq:
+                if d[:3] != HDR or len(d) < 5 or d[3] != seq:
                     continue
                 code = d[4]
                 if long_hdr and len(d) >= 9:   # <teil hi> <teil lo> <teile hi> <teile lo>
@@ -127,6 +135,47 @@ class Bridge:
         if parts:
             raise BridgeError("Antwort unvollstaendig (%d von %d Teilen)" % (len(parts), total))
         raise BridgeError("Keine Antwort vom Geraet")
+
+    def _send_message(self, data):
+        try:
+            self.out.send(self.mido.Message("sysex", data=data))
+        except (SystemError, RuntimeError) as e:
+            raise BridgeError("MIDI send failed (%d bytes): %s" % (len(data) + 2, e)) from e
+
+    def _send_staged(self, data):
+        """Relay one original request through bounded, acknowledged EVALs.
+
+        Bridge >= 0.6 exposes its JS sqlPending object and sysEx dispatcher.
+        A non-enumerable temporary property keeps staging out of pollSql's
+        for-in loop. Only the final EVAL dispatches the original request:
+        no partial SQL, no new transaction, no firmware change.
+        """
+        if self.vnum < (0, 6):
+            raise BridgeError("Large MIDI requests require bridge firmware 0.6 or newer. "
+                              "Use USB Transfer to import this rig.")
+        key = "_mxedit_" + uuid.uuid4().hex
+        ref = "device.sqlPending." + key
+        # Stage the exact MIDI frame as ASCII hex, so Unicode escapes and
+        # protocol fields survive unchanged and chunks cannot inject JS.
+        frame = " ".join("%02X" % b for b in [0xF0] + data + [0xF7])
+        try:
+            self.eval('Object.defineProperty(device.sqlPending,"%s",'
+                      '{value:[],configurable:true,enumerable:false});return "ready";' % key)
+            for off in range(0, len(frame), STAGE_CHUNK):
+                self.eval('%s.push("%s");return "ok";' % (ref, frame[off:off + STAGE_CHUNK]))
+            js = 'var p=%s.join("");delete %s;device.sysEx(p);' % (ref, ref)
+            # Seq 0 is reserved for the relay's own acknowledgement. The
+            # caller waits for the original seq, including asynchronous SQL.
+            self._send_message(HDR + [0, 0x07 | (0x20 if self.long else 0)] +
+                               [ord(c) for c in js])
+        except Exception:
+            # Never retry dispatch: a write might already have taken effect.
+            # Best-effort cleanup must not hide the original failure.
+            try:
+                self.request(0x07, "delete %s;" % ref, timeout=1.0)
+            except Exception:
+                pass
+            raise
 
     RETRY_PING = 1.0   # s: Ping vor dem Wiederholen einer ausgebliebenen Antwort
 
