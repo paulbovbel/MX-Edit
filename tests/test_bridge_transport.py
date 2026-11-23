@@ -4,13 +4,14 @@ from pathlib import Path
 import re
 import sqlite3
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 import weakref
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "editor"))
 from bridge import Bridge, BridgeError, HDR, MAX_REQUEST, escape, unescape
-from live import import_rig_file
+from live import content_with_name, import_rig_file
 
 
 class Firmware:
@@ -172,16 +173,20 @@ class TransportTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "MIDI send failed"):
             br.request(2, "test")
 
-    def test_import_actual_pack(self):
+    def test_import_large_rig_files(self):
         br, fw = connect()
-        folder = Path(__file__).resolve().parents[1] / "presets"
-        paths = [folder / (name + ".rig") for name in
-                 ("NEON GLASS", "COPPER EDGE", "ORBITAL BLOOM", "VELVET RIOT", "OBSIDIAN TIGHT")]
-        for path in paths:
-            rid, status = import_rig_file(br, str(path))
-            self.assertEqual(status, "new")
-            content = fw.db.execute("select content from rigs where id=?", (rid,)).fetchone()[0]
-            self.assertEqual(content, json.loads(path.read_text())["content"])
+        fixture = Path(__file__).resolve().parents[1] / "editor" / "werkzeuge" / "regtest_rig.rig"
+        original = json.loads(fixture.read_text())
+        with tempfile.TemporaryDirectory(prefix="mx-edit-transport-") as folder:
+            for i in range(5):
+                name = "TRANSPORT TEST %d" % i
+                rig = dict(original, content=content_with_name(original["content"], name))
+                path = Path(folder) / (name + ".rig")
+                path.write_text(json.dumps(rig), encoding="utf-8")
+                rid, status = import_rig_file(br, str(path))
+                self.assertEqual(status, "new")
+                content = fw.db.execute("select content from rigs where id=?", (rid,)).fetchone()[0]
+                self.assertEqual(content, rig["content"])
         self.assertEqual(fw.db.execute("select count(*) from rigs").fetchone()[0], 5)
         self.assertEqual(len(fw.dispatched), 5)
         self.assertTrue(all(len(m) + 2 <= MAX_REQUEST for m in fw.messages))

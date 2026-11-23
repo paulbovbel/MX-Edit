@@ -66,7 +66,7 @@ class EnglishMessageTests(unittest.TestCase):
 
     def test_restore_report_uses_english_status_keys(self):
         br, _ = self.connection()
-        source = Path(__file__).resolve().parents[1] / "presets" / "NEON GLASS.rig"
+        source = Path(__file__).resolve().parents[1] / "editor" / "werkzeuge" / "regtest_rig.rig"
         with tempfile.TemporaryDirectory(prefix="mx-edit-english-") as folder:
             rigs = Path(folder) / "Rigs"
             rigs.mkdir()
